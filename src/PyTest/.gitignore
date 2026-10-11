@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Generated at runtime by the vm_create fixture
+replaced_config/
+
+# Test/report output
+output/
+allure-results/
+report.html

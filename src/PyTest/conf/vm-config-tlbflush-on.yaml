@@ -1,0 +1,101 @@
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: "{{ vmName }}"
+  namespace: windows-bsod
+spec:
+  runStrategy: Always
+  # Dynamically creates/clones a new PVC named after the generated VM
+  dataVolumeTemplates:
+    - metadata:
+        name: "{{ vmName }}"
+      spec:
+        storage:
+          resources:
+            requests:
+              storage: 80Gi
+          storageClassName: ocs-storagecluster-ceph-rbd-virtualization
+        source:
+          pvc:
+            namespace: windows-bsod
+            name: hjoshi-boot-disk  # Source golden image
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: "{{ vmName }}"
+        kubevirt.io/domain: "{{ vmName }}"
+    spec:
+      nodeSelector:
+        memory-backend: enabled
+      domain:
+        cpu:
+          cores: 4
+          sockets: 1
+          threads: 1
+          model: EPYC-Genoa
+        memory:
+          guest: "16Gi"
+        clock:
+          utc: {}
+          timer:
+            hpet:
+              present: false
+            pit:
+              tickPolicy: delay
+            rtc:
+              tickPolicy: catchup
+            hyperv: {}
+        features:
+          smm: {}
+          hyperv:
+            relaxed: {}
+            vapic: {}
+            spinlocks:
+              enabled: true
+              spinlocks: 8191
+            synic: {}
+            synictimer:
+              enabled: true
+            frequencies: {}
+            reenlightenment: {}
+            ipi: {}
+            runtime: {}
+            reset: {}
+        firmware:
+          bootloader:
+            efi:
+              secureBoot: true
+        devices:
+          disks:
+            - name: rootdisk
+              disk:
+                bus: virtio
+            - name: virtiocontainerdisk
+              cdrom:
+                bus: sata
+          interfaces:
+            - name: default
+              masquerade: {}
+          inputs:
+            - type: tablet
+              bus: usb
+              name: tablet
+        machine:
+          type: q35
+        resources:
+          requests:
+            memory: "16Gi"
+            cpu: "4"
+          limits:
+            memory: "16Gi"
+            cpu: "4"
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - name: rootdisk
+          dataVolume:
+            name: "{{ vmName }}"
+        - name: virtiocontainerdisk
+          containerDisk:
+            image: container-native-virtualization/virtio-win:v4.12-1784795134

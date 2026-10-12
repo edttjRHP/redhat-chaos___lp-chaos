@@ -77,17 +77,19 @@ The `96Gi` and `gp3-csi` values reproduce the source example; they do not
 assert that `gp3-csi` exists on every cluster. Callers must override capacity
 or storage class when their target cluster requires different values.
 
-Caller-owned string fields are converted to strings and JSON-serialized before
-being embedded in YAML. For example, Namespace is rendered without outer YAML
-quotes in the template source:
+Caller-owned string fields are converted and JSON-serialized once during
+template initialization. Manifest expressions then reuse the prepared value:
 ```yaml
-namespace: {{vmNS | default('default') | string | tojson}}
+{% set vmNS = vmNS | default('default') | string | tojson %}
+...
+namespace: {{ vmNS }}
 ```
 This preserves YAML-looking values such as `123`, `true`, and `null` as strings
 and escapes quotes, backslashes, newlines, and control characters once. The
 conversion defines representation, not Kubernetes domain validity. The
-DataVolume name is resolved once and used for both its metadata and the VM
-volume reference. VM layout identifiers such as `vhd--00-fs-rootfs`,
+DataVolume name is derived from the native VM name before either value is
+serialized, then reused for both its metadata and the VM volume reference. VM
+layout identifiers such as `vhd--00-fs-rootfs`,
 `cloud-init-disk`, `nic--0`, and `tablet` are fixed structural values, not
 context knobs.
 

@@ -1,5 +1,6 @@
 import base64
 from pathlib import Path
+import re
 from unittest import mock
 
 from jinja2 import Environment, meta
@@ -427,18 +428,20 @@ def test_Render_VMtemplate_FixesStructuralWikiIdentifiers() -> None:
     assert templateSpec['volumes'][1]['name'] == 'cloud-init-disk'
 
 
-def test_VMtemplate_UsesNineKeysAndUnpaddedDelimiters() -> None:
+def test_VMtemplate_UsesNineKeysSpacedDelimitersAndBareOutputs() -> None:
     template = VM_TEMPLATE.read_text()
     contextKeys = meta.find_undeclared_variables(Environment().parse(template))
+    expressions = re.findall(r'{{.*?}}', template, flags=re.DOTALL)
+    statements = re.findall(r'{%.*?%}', template, flags=re.DOTALL)
+    initialization, manifest = template.split('apiVersion:', maxsplit=1)
+    manifestExpressions = re.findall(r'{{ (.*?) }}', manifest)
 
-    assert '{{ ' not in template
-    assert ' }}' not in template
-    assert '{% ' not in template
-    assert ' %}' not in template
-    assert (
-        "namespace: {{vmNS | default('default') | string | tojson}}" in
-        template
-    )
+    assert expressions
+    assert statements
+    assert all(value.startswith('{{ ') and value.endswith(' }}')
+               for value in expressions)
+    assert all(value.startswith('{% ') and value.endswith(' %}')
+               for value in statements)
     assert 'namespace: "{{' not in template
     assert contextKeys == {
         'sshPublicKeyB64',
@@ -451,6 +454,38 @@ def test_VMtemplate_UsesNineKeysAndUnpaddedDelimiters() -> None:
         'vmStorageClass',
         'vmStorageSize',
     }
+    assert set(manifestExpressions) == contextKeys
+    assert len(manifestExpressions) == len(re.findall(r'{{.*?}}', manifest))
+    assert '| default' not in manifest
+    assert '| string' not in manifest
+    assert '| tojson' not in manifest
+    serializers = re.findall(
+        r'{% set (\w+) = .*?\| tojson %}',
+        initialization,
+    )
+    assert set(serializers) == contextKeys
+    assert len(serializers) == len(contextKeys)
+    assert 'resolved' not in template
+
+    nativeVMname = (
+        "{% set vmName = vmName | default('vm-img--windows') | string %}"
+    )
+    nativeDVname = (
+        "{% set vmDataVolumeName = vmDataVolumeName | "
+        "default(vmName + '--vhd--00-system') | string %}"
+    )
+    assert template.index(nativeVMname) < template.index(nativeDVname)
+    assert template.index(nativeDVname) < template.index(
+        '{% set vmName = vmName | tojson %}'
+    )
+    assert template.index(
+        '{% if vmDataVolumeSource is not defined %}'
+    ) < template.index(
+        '{% set vmDataVolumeSource = vmDataVolumeSource | tojson %}'
+    )
+    assert template.index(
+        '{% if vmCpuCores is not integer or vmCpuCores <= 0 %}'
+    ) < template.index('{% set vmCpuCores = vmCpuCores | tojson %}')
 
 
 def test_ToDict_HandlesDictYAMLandBlankInput() -> None:

@@ -77,6 +77,8 @@ The `96Gi` and `gp3-csi` values reproduce the source example; they do not
 assert that `gp3-csi` exists on every cluster. Callers must override capacity
 or storage class when their target cluster requires different values.
 
+Raw caller inputs are checked before defaulting or conversion. All defaults,
+native preparation, and serialization then form one initialization block.
 Caller-owned string fields are converted and JSON-serialized once during
 template initialization. Manifest expressions then reuse the prepared value:
 ```yaml

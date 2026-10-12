@@ -3,21 +3,6 @@
 #       A non-empty mapping containing a valid CDI `DataVolume.spec.source`.
 #   - sshPublicKeyB64:
 #       A non-empty Base64-encoded OpenSSH public-key string for guest access.
-# Defaultable caller context (camelCase):
-#   - vmName: String; default `vm-img--windows`.
-#   - vmNS: String; default `default`.
-#   - vmDataVolumeName: String; default `<vmName>--vhd--00-system`.
-#   - vmStorageSize: String; default `96Gi`.
-#   - vmStorageClass: String; default `gp3-csi`.
-#   - vmCpuCores: Positive integer; default `4`.
-#   - vmMemory: String; default `8Gi`.
-# Checks cover basic shape/type only. Callers own CDI schema/backend, quantity
-# and name validity, plus Base64 and OpenSSH public-key validity.
-{% set vmName = vmName | default('vm-img--windows') | string %}
-{% set vmDataVolumeName = vmDataVolumeName | default(vmName + '--vhd--00-system') | string %}
-{% set vmCpuCores = vmCpuCores | default(4) %}
-# The renderer has no raise helper. Dereferencing each missing diagnostic key
-# makes Jinja report a field-specific UndefinedError for invalid context.
 {% if vmDataVolumeSource is not defined %}
 {{ {}['vmDataVolumeSource is required'].fail }}
 {% elif vmDataVolumeSource is not mapping or not vmDataVolumeSource %}
@@ -28,9 +13,12 @@
 {% elif sshPublicKeyB64 is not string or not (sshPublicKeyB64 | trim) %}
 {{ {}['sshPublicKeyB64 must be a non-empty string'].fail }}
 {% endif %}
-{% if vmCpuCores is not integer or vmCpuCores <= 0 %}
+{% if vmCpuCores is defined and (vmCpuCores is not integer or vmCpuCores <= 0) %}
 {{ {}['vmCpuCores must be a positive integer'].fail }}
 {% endif %}
+{% set vmName = vmName | default('vm-img--windows') | string %}
+{% set vmDataVolumeName = vmDataVolumeName | default(vmName + '--vhd--00-system') | string %}
+{% set vmCpuCores = vmCpuCores | default(4) %}
 {% set vmName = vmName | tojson %}
 {% set vmNS = vmNS | default('default') | string | tojson %}
 {% set vmDataVolumeName = vmDataVolumeName | tojson %}

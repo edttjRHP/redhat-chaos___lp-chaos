@@ -336,10 +336,15 @@ def test_Render_VMtemplate_ReportsMissingRequiredContext(
     missingKey: str,
     context: dict,
 ) -> None:
+    vmName = mock.MagicMock()
+    vmName.__str__.side_effect = AssertionError('VM name coerced before checks')
+    context = context | {'vmName': vmName}
+
     with pytest.raises(UndefinedError, match=missingKey):
         MUT.YAMLcfg.Render(VM_TEMPLATE, context)
 
     assert missingKey not in context
+    vmName.__str__.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -349,26 +354,51 @@ def test_Render_VMtemplate_ReportsMissingRequiredContext(
         ('vmDataVolumeSource', []),
         ('vmDataVolumeSource', 's3'),
         ('vmDataVolumeSource', None),
+        ('vmDataVolumeSource', True),
+        ('vmDataVolumeSource', 123),
+        ('vmDataVolumeSource', 1.5),
         ('sshPublicKeyB64', ''),
         ('sshPublicKeyB64', '  '),
         ('sshPublicKeyB64', 123),
         ('sshPublicKeyB64', None),
+        ('sshPublicKeyB64', {}),
+        ('sshPublicKeyB64', []),
+        ('sshPublicKeyB64', True),
+        ('sshPublicKeyB64', 1.5),
         ('vmCpuCores', 0),
         ('vmCpuCores', -1),
         ('vmCpuCores', True),
         ('vmCpuCores', 4.0),
         ('vmCpuCores', '4'),
         ('vmCpuCores', None),
+        ('vmCpuCores', False),
+        ('vmCpuCores', {}),
+        ('vmCpuCores', []),
+        ('vmCpuCores', ''),
     ],
 )
 def test_Render_VMtemplate_RejectsInvalidContractValues(
     field: str,
     value: object,
 ) -> None:
-    context = REQUIRED_VM_CONTEXT | {field: value}
+    vmName = mock.MagicMock()
+    vmName.__str__.side_effect = AssertionError('VM name coerced before checks')
+    context = REQUIRED_VM_CONTEXT | {field: value, 'vmName': vmName}
 
     with pytest.raises(UndefinedError, match=field):
         MUT.YAMLcfg.Render(VM_TEMPLATE, context)
+
+    vmName.__str__.assert_not_called()
+
+
+def test_Render_VMtemplate_CoercesVMnameAfterValidChecks() -> None:
+    vmName = mock.MagicMock()
+    vmName.__str__.side_effect = AssertionError('VM name conversion reached')
+
+    with pytest.raises(AssertionError, match='VM name conversion reached'):
+        MUT.YAMLcfg.Render(VM_TEMPLATE, REQUIRED_VM_CONTEXT | {'vmName': vmName})
+
+    vmName.__str__.assert_called_once_with()
 
 
 def test_Render_VMtemplate_PreservesStructuredSourceTypes() -> None:
@@ -478,14 +508,21 @@ def test_VMtemplate_UsesNineKeysSpacedDelimitersAndBareOutputs() -> None:
     assert template.index(nativeDVname) < template.index(
         '{% set vmName = vmName | tojson %}'
     )
-    assert template.index(
-        '{% if vmDataVolumeSource is not defined %}'
-    ) < template.index(
-        '{% set vmDataVolumeSource = vmDataVolumeSource | tojson %}'
-    )
-    assert template.index(
-        '{% if vmCpuCores is not integer or vmCpuCores <= 0 %}'
-    ) < template.index('{% set vmCpuCores = vmCpuCores | tojson %}')
+    guards, bindings = initialization.split('{% set ', maxsplit=1)
+    assert '{% if vmDataVolumeSource is not defined %}' in guards
+    assert '{% if sshPublicKeyB64 is not defined %}' in guards
+    assert (
+        '{% if vmCpuCores is defined and '
+        '(vmCpuCores is not integer or vmCpuCores <= 0) %}'
+    ) in guards
+    assert guards.count('{% endif %}') == 3
+    assert all(operation not in guards for operation in (
+        '| default', '| string', '| tojson',
+    ))
+    assert all(statement.startswith('{% set ') for statement in re.findall(
+        r'{%.*?%}', '{% set ' + bindings,
+    ))
+    assert '{{' not in bindings
 
 
 def test_ToDict_HandlesDictYAMLandBlankInput() -> None:

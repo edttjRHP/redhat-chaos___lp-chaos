@@ -3,18 +3,18 @@
 #       A non-empty mapping containing a valid CDI `DataVolume.spec.source`.
 #   - sshPublicKeyB64:
 #       A non-empty Base64-encoded OpenSSH public-key string for guest access.
-{% if vmDataVolumeSource is not defined %}
-{{ {}['vmDataVolumeSource is required'].fail }}
-{% elif vmDataVolumeSource is not mapping or not vmDataVolumeSource %}
-{{ {}['vmDataVolumeSource must be a non-empty mapping'].fail }}
+{% if (vmDataVolumeSource is not defined) %}
+    {{ {}['vmDataVolumeSource is required'].fail }}
+{% elif (vmDataVolumeSource is not mapping or not vmDataVolumeSource) %}
+    {{ {}['vmDataVolumeSource must be a non-empty mapping'].fail }}
 {% endif %}
-{% if sshPublicKeyB64 is not defined %}
-{{ {}['sshPublicKeyB64 is required'].fail }}
-{% elif sshPublicKeyB64 is not string or not (sshPublicKeyB64 | trim) %}
-{{ {}['sshPublicKeyB64 must be a non-empty string'].fail }}
+{% if (sshPublicKeyB64 is not defined) %}
+    {{ {}['sshPublicKeyB64 is required'].fail }}
+{% elif (sshPublicKeyB64 is not string or not (sshPublicKeyB64 | trim)) %}
+    {{ {}['sshPublicKeyB64 must be a non-empty string'].fail }}
 {% endif %}
-{% if vmCpuCores is defined and (vmCpuCores is not integer or vmCpuCores <= 0) %}
-{{ {}['vmCpuCores must be a positive integer'].fail }}
+{% if (vmCpuCores is defined and (vmCpuCores is not integer or vmCpuCores <= 0)) %}
+    {{ {}['vmCpuCores must be a positive integer'].fail }}
 {% endif %}
 {% set vmName = vmName | default('vm-img--windows') | string %}
 {% set vmDataVolumeName = vmDataVolumeName | default(vmName + '--vhd--00-system') | string %}

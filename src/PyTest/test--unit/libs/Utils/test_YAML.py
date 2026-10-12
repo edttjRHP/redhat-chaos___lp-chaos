@@ -509,12 +509,25 @@ def test_VMtemplate_UsesNineKeysSpacedDelimitersAndBareOutputs() -> None:
         '{% set vmName = vmName | tojson %}'
     )
     guards, bindings = initialization.split('{% set ', maxsplit=1)
-    assert '{% if vmDataVolumeSource is not defined %}' in guards
-    assert '{% if sshPublicKeyB64 is not defined %}' in guards
+    assert '{% if (vmDataVolumeSource is not defined) %}' in guards
     assert (
-        '{% if vmCpuCores is defined and '
-        '(vmCpuCores is not integer or vmCpuCores <= 0) %}'
+        '{% elif (vmDataVolumeSource is not mapping or '
+        'not vmDataVolumeSource) %}'
     ) in guards
+    assert '{% if (sshPublicKeyB64 is not defined) %}' in guards
+    assert (
+        '{% elif (sshPublicKeyB64 is not string or '
+        'not (sshPublicKeyB64 | trim)) %}'
+    ) in guards
+    assert (
+        '{% if (vmCpuCores is defined and '
+        '(vmCpuCores is not integer or vmCpuCores <= 0)) %}'
+    ) in guards
+    assert all(condition.startswith('(') and condition.endswith(')')
+               for condition in re.findall(r'{% (?:if|elif) (.*?) %}', guards))
+    failures = [line for line in guards.splitlines() if '{{' in line]
+    assert len(failures) == 5
+    assert all(line.startswith('    {{ ') for line in failures)
     assert guards.count('{% endif %}') == 3
     assert all(operation not in guards for operation in (
         '| default', '| string', '| tojson',

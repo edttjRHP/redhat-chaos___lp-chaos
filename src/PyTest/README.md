@@ -50,12 +50,27 @@ therefore be reviewed before running anything beyond collection.
   portable acceptance suite.
 - benchmark-runner is used by the framework but is not pinned in
   `requirements.txt`.
-- The template-based provisioning example expects a template name that is not
-  present under `conf/` at this ref; the included VM template must be selected
-  explicitly before that path can run.
+- The template-based provisioning example requires deployment-specific VM
+  template context before that path can run.
 - The implemented krkn-lib scenarios cover launcher-pod recovery and a
   non-destructive host inspection. Fault injection that targets BSOD behavior
   remains future work.
+
+
+### VM Template Context
+
+`conf/config--vm--template.yaml` is rendered with caller-owned `ctxData`; the
+framework does not provide a default context file. Template context keys use
+camelCase, while preserving the established `vmName` and `vmNS` names. A
+caller supplies its deployment-specific `vmName`, `vmNS`,
+`vmDataVolumeName`, `vmDataVolumeSource` mapping, `vmStorageSize`, and
+`vmStorageClass` values. The template header documents every optional
+camelCase override and its source-derived default.
+
+The `sshPublicKeyB64` value has an explicit pre-encoded contract: it must be
+the base64 encoding of the complete raw OpenSSH public-key text. The template
+passes that value through unchanged because the cloud-init `write_files`
+entry declares `encoding: b64` and performs the decoding in the guest.
 
 
 ## Getting Started

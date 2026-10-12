@@ -1,0 +1,127 @@
+# Caller context for deployment-specific fields (camelCase):
+#   vmName, vmNS, vmDataVolumeName, vmDataVolumeSource (mapping),
+#   vmStorageSize, vmStorageClass, and sshPublicKeyB64. sshPublicKeyB64 must
+#   contain the base64 encoding of the complete raw OpenSSH public-key text;
+#   cloud-init decodes it because write_files declares encoding: b64.
+# Optional context (defaults match the source manifest):
+#   vmDataVolumeAccessMode, vmRunStrategy, vmArchitecture,
+#   vmHypervTimerPresent, vmCpuCores, vmCpuSockets, vmCpuThreads,
+#   vmAutoattachPodInterface, vmDiskBootOrder, vmRootDiskBus,
+#   vmRootDiskName, vmCloudInitDiskBus, vmCloudInitDiskName,
+#   vmInputBus, vmInputName, vmInputType, vmInterfaceModel,
+#   vmNetworkName, vmNetworkInterfaceMultiqueue, vmSpinlocksEnabled,
+#   vmSpinlocks, vmSecureBoot, vmMachineType, and vmMemory.
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: {{vmName | default('') | tojson}}
+  namespace: {{vmNS | default('') | tojson}}
+  labels:
+    usrMeta.vmGroup: {{vmName | default('') | tojson}}
+spec:
+  dataVolumeTemplates:
+    - apiVersion: cdi.kubevirt.io/v1beta1
+      kind: DataVolume
+      metadata:
+        annotations:
+          cdi.kubevirt.io/storage.bind.immediate.requested: "true"
+        name: {{vmDataVolumeName | default('') | tojson}}
+        labels:
+          usrMeta.volGroup: {{vmName | default('') | tojson}}
+      spec:
+        source: {{vmDataVolumeSource | default({}) | tojson}}
+        storage:
+          accessModes:
+            - {{vmDataVolumeAccessMode | default('ReadWriteOnce') | tojson}}
+          resources:
+            requests:
+              storage: {{vmStorageSize | default('') | tojson}}
+          storageClassName: {{vmStorageClass | default('') | tojson}}
+  runStrategy: {{vmRunStrategy | default('Manual') | tojson}}
+  template:
+    metadata:
+      labels:
+        kubevirt.io/domain: {{vmName | default('') | tojson}}
+        kubevirt.io/vm: {{vmName | default('') | tojson}}
+    spec:
+      architecture: {{vmArchitecture | default('amd64') | tojson}}
+      domain:
+        clock:
+          timer:
+            hyperv:
+              present: {{vmHypervTimerPresent | default(true)}}
+        cpu:
+          cores: {{vmCpuCores | default(4)}}
+          sockets: {{vmCpuSockets | default(1)}}
+          threads: {{vmCpuThreads | default(1)}}
+        devices:
+          autoattachPodInterface: {{vmAutoattachPodInterface | default(false)}}
+          disks:
+            - bootOrder: {{vmDiskBootOrder | default(1)}}
+              disk:
+                bus: {{vmRootDiskBus | default('virtio') | tojson}}
+              name: {{vmRootDiskName | default('vhd--00-fs-rootfs') | tojson}}
+            - cdrom:
+                bus: {{vmCloudInitDiskBus | default('sata') | tojson}}
+              name: {{vmCloudInitDiskName | default('cloud-init-disk') | tojson}}
+          inputs:
+            - bus: {{vmInputBus | default('usb') | tojson}}
+              name: {{vmInputName | default('tablet') | tojson}}
+              type: {{vmInputType | default('tablet') | tojson}}
+          interfaces:
+            - masquerade: {}
+              model: {{vmInterfaceModel | default('virtio') | tojson}}
+              name: {{vmNetworkName | default('nic--0') | tojson}}
+          networkInterfaceMultiqueue: {{vmNetworkInterfaceMultiqueue | default(true)}}
+          tpm: {}
+        features:
+          hyperv:
+            frequencies: {}
+            ipi: {}
+            reenlightenment: {}
+            relaxed: {}
+            reset: {}
+            runtime: {}
+            spinlocks:
+              enabled: {{vmSpinlocksEnabled | default(true)}}
+              spinlocks: {{vmSpinlocks | default(8191)}}
+            synic: {}
+            synictimer:
+              direct: {}
+            tlbflush: {}
+            vapic: {}
+            vpindex: {}
+          smm: {}
+        firmware:
+          bootloader:
+            efi:
+              secureBoot: {{vmSecureBoot | default(true)}}
+        machine:
+          type: {{vmMachineType | default('q35') | tojson}}
+        memory:
+          guest: {{vmMemory | default('8Gi') | tojson}}
+        resources:
+          limits:
+            memory: {{vmMemory | default('8Gi') | tojson}}
+          requests:
+            memory: {{vmMemory | default('8Gi') | tojson}}
+      networks:
+        - name: {{vmNetworkName | default('nic--0') | tojson}}
+          pod: {}
+      volumes:
+        - dataVolume:
+            name: {{vmDataVolumeName | default('') | tojson}}
+          name: {{vmRootDiskName | default('vhd--00-fs-rootfs') | tojson}}
+        - cloudInitNoCloud:
+            userData: |
+                #cloud-config
+                runcmd:
+                  - powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command "
+                        $s = \"${env:ProgramData}\Scripts\Script--App--CloudBaseInit--Main.ps1\";
+                        if (Test-Path -Path $s) {& $s}
+                    "
+                write_files:
+                  - path: C:\ProgramData\Scripts\Data--App--CloudBaseInit--SSH.txt
+                    encoding: b64
+                    content: {{sshPublicKeyB64 | default('') | tojson}}
+          name: {{vmCloudInitDiskName | default('cloud-init-disk') | tojson}}

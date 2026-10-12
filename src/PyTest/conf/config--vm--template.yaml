@@ -1,23 +1,43 @@
-# Caller context for deployment-specific fields (camelCase):
-#   vmName, vmNS, vmDataVolumeName, vmDataVolumeSource (mapping),
-#   vmStorageSize, vmStorageClass, and sshPublicKeyB64. sshPublicKeyB64 must
-#   contain the base64 encoding of the complete raw OpenSSH public-key text;
-#   cloud-init decodes it because write_files declares encoding: b64.
-# Optional context (defaults match the source manifest):
-#   vmDataVolumeAccessMode, vmRunStrategy, vmArchitecture,
-#   vmHypervTimerPresent, vmCpuCores, vmCpuSockets, vmCpuThreads,
-#   vmAutoattachPodInterface, vmDiskBootOrder, vmRootDiskBus,
-#   vmRootDiskName, vmCloudInitDiskBus, vmCloudInitDiskName,
-#   vmInputBus, vmInputName, vmInputType, vmInterfaceModel,
-#   vmNetworkName, vmNetworkInterfaceMultiqueue, vmSpinlocksEnabled,
-#   vmSpinlocks, vmSecureBoot, vmMachineType, and vmMemory.
+# Required caller context (camelCase):
+#   vmDataVolumeSource (non-empty mapping) and sshPublicKeyB64 (non-empty
+#   string). The source must identify a real caller-owned image.
+#   sshPublicKeyB64 must contain the base64 encoding of the complete raw OpenSSH
+#   public-key text; cloud-init decodes it because write_files declares
+#   encoding: b64. The caller owns source-schema and encoded-key validation.
+# Defaultable deployment context:
+#   vmName='vm-img--windows', vmNS='default',
+#   vmDataVolumeName=vmName+'--vhd--00-system', vmStorageSize='96Gi',
+#   vmStorageClass='gp3-csi', vmCpuCores=4, and vmMemory='8Gi'. The storage
+#   defaults reproduce the source example; callers must select values supported
+#   by their cluster.
+{%set resolvedVMname = vmName | default('vm-img--windows') | string%}
+{%set resolvedDVname = vmDataVolumeName | default(resolvedVMname + '--vhd--00-system')%}
+{%set resolvedStorageSize = vmStorageSize | default('96Gi')%}
+{%set resolvedStorageClass = vmStorageClass | default('gp3-csi')%}
+{%set resolvedCPUcores = vmCpuCores | default(4)%}
+{%set resolvedMemory = vmMemory | default('8Gi')%}
+# The renderer has no raise helper. Dereferencing each missing diagnostic key
+# makes Jinja report a field-specific UndefinedError for invalid context.
+{%if vmDataVolumeSource is not defined%}
+{{{}['vmDataVolumeSource is required'].fail}}
+{%elif vmDataVolumeSource is not mapping or not vmDataVolumeSource%}
+{{{}['vmDataVolumeSource must be a non-empty mapping'].fail}}
+{%endif%}
+{%if sshPublicKeyB64 is not defined%}
+{{{}['sshPublicKeyB64 is required'].fail}}
+{%elif sshPublicKeyB64 is not string or not (sshPublicKeyB64 | trim)%}
+{{{}['sshPublicKeyB64 must be a non-empty string'].fail}}
+{%endif%}
+{%if resolvedCPUcores is not integer or resolvedCPUcores <= 0%}
+{{{}['vmCpuCores must be a positive integer'].fail}}
+{%endif%}
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
-  name: {{vmName | default('') | tojson}}
-  namespace: {{vmNS | default('') | tojson}}
+  name: {{resolvedVMname | string | tojson}}
+  namespace: {{vmNS | default('default') | string | tojson}}
   labels:
-    usrMeta.vmGroup: {{vmName | default('') | tojson}}
+    usrMeta.vmGroup: {{resolvedVMname | string | tojson}}
 spec:
   dataVolumeTemplates:
     - apiVersion: cdi.kubevirt.io/v1beta1
@@ -25,54 +45,54 @@ spec:
       metadata:
         annotations:
           cdi.kubevirt.io/storage.bind.immediate.requested: "true"
-        name: {{vmDataVolumeName | default('') | tojson}}
+        name: {{resolvedDVname | string | tojson}}
         labels:
-          usrMeta.volGroup: {{vmName | default('') | tojson}}
+          usrMeta.volGroup: {{resolvedVMname | string | tojson}}
       spec:
-        source: {{vmDataVolumeSource | default({}) | tojson}}
+        source: {{vmDataVolumeSource | tojson}}
         storage:
           accessModes:
-            - {{vmDataVolumeAccessMode | default('ReadWriteOnce') | tojson}}
+            - ReadWriteOnce
           resources:
             requests:
-              storage: {{vmStorageSize | default('') | tojson}}
-          storageClassName: {{vmStorageClass | default('') | tojson}}
-  runStrategy: {{vmRunStrategy | default('Manual') | tojson}}
+              storage: {{resolvedStorageSize | string | tojson}}
+          storageClassName: {{resolvedStorageClass | string | tojson}}
+  runStrategy: Manual
   template:
     metadata:
       labels:
-        kubevirt.io/domain: {{vmName | default('') | tojson}}
-        kubevirt.io/vm: {{vmName | default('') | tojson}}
+        kubevirt.io/domain: {{resolvedVMname | string | tojson}}
+        kubevirt.io/vm: {{resolvedVMname | string | tojson}}
     spec:
-      architecture: {{vmArchitecture | default('amd64') | tojson}}
+      architecture: amd64
       domain:
         clock:
           timer:
             hyperv:
-              present: {{vmHypervTimerPresent | default(true)}}
+              present: true
         cpu:
-          cores: {{vmCpuCores | default(4)}}
-          sockets: {{vmCpuSockets | default(1)}}
-          threads: {{vmCpuThreads | default(1)}}
+          cores: {{resolvedCPUcores | tojson}}
+          sockets: 1
+          threads: 1
         devices:
-          autoattachPodInterface: {{vmAutoattachPodInterface | default(false)}}
+          autoattachPodInterface: false
           disks:
-            - bootOrder: {{vmDiskBootOrder | default(1)}}
+            - bootOrder: 1
               disk:
-                bus: {{vmRootDiskBus | default('virtio') | tojson}}
-              name: {{vmRootDiskName | default('vhd--00-fs-rootfs') | tojson}}
+                bus: virtio
+              name: vhd--00-fs-rootfs
             - cdrom:
-                bus: {{vmCloudInitDiskBus | default('sata') | tojson}}
-              name: {{vmCloudInitDiskName | default('cloud-init-disk') | tojson}}
+                bus: sata
+              name: cloud-init-disk
           inputs:
-            - bus: {{vmInputBus | default('usb') | tojson}}
-              name: {{vmInputName | default('tablet') | tojson}}
-              type: {{vmInputType | default('tablet') | tojson}}
+            - bus: usb
+              name: tablet
+              type: tablet
           interfaces:
             - masquerade: {}
-              model: {{vmInterfaceModel | default('virtio') | tojson}}
-              name: {{vmNetworkName | default('nic--0') | tojson}}
-          networkInterfaceMultiqueue: {{vmNetworkInterfaceMultiqueue | default(true)}}
+              model: virtio
+              name: nic--0
+          networkInterfaceMultiqueue: true
           tpm: {}
         features:
           hyperv:
@@ -83,8 +103,8 @@ spec:
             reset: {}
             runtime: {}
             spinlocks:
-              enabled: {{vmSpinlocksEnabled | default(true)}}
-              spinlocks: {{vmSpinlocks | default(8191)}}
+              enabled: true
+              spinlocks: 8191
             synic: {}
             synictimer:
               direct: {}
@@ -95,23 +115,23 @@ spec:
         firmware:
           bootloader:
             efi:
-              secureBoot: {{vmSecureBoot | default(true)}}
+              secureBoot: true
         machine:
-          type: {{vmMachineType | default('q35') | tojson}}
+          type: q35
         memory:
-          guest: {{vmMemory | default('8Gi') | tojson}}
+          guest: {{resolvedMemory | string | tojson}}
         resources:
           limits:
-            memory: {{vmMemory | default('8Gi') | tojson}}
+            memory: {{resolvedMemory | string | tojson}}
           requests:
-            memory: {{vmMemory | default('8Gi') | tojson}}
+            memory: {{resolvedMemory | string | tojson}}
       networks:
-        - name: {{vmNetworkName | default('nic--0') | tojson}}
+        - name: nic--0
           pod: {}
       volumes:
         - dataVolume:
-            name: {{vmDataVolumeName | default('') | tojson}}
-          name: {{vmRootDiskName | default('vhd--00-fs-rootfs') | tojson}}
+            name: {{resolvedDVname | string | tojson}}
+          name: vhd--00-fs-rootfs
         - cloudInitNoCloud:
             userData: |
                 #cloud-config
@@ -123,5 +143,5 @@ spec:
                 write_files:
                   - path: C:\ProgramData\Scripts\Data--App--CloudBaseInit--SSH.txt
                     encoding: b64
-                    content: {{sshPublicKeyB64 | default('') | tojson}}
-          name: {{vmCloudInitDiskName | default('cloud-init-disk') | tojson}}
+                    content: {{sshPublicKeyB64 | string | tojson}}
+          name: cloud-init-disk

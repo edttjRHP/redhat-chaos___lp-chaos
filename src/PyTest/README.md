@@ -61,16 +61,50 @@ therefore be reviewed before running anything beyond collection.
 
 `conf/config--vm--template.yaml` is rendered with caller-owned `ctxData`; the
 framework does not provide a default context file. Template context keys use
-camelCase, while preserving the established `vmName` and `vmNS` names. A
-caller supplies its deployment-specific `vmName`, `vmNS`,
-`vmDataVolumeName`, `vmDataVolumeSource` mapping, `vmStorageSize`, and
-`vmStorageClass` values. The template header documents every optional
-camelCase override and its source-derived default.
+camelCase and preserve the established `vmName` and `vmNS` names. Its complete
+context interface is:
 
-The `sshPublicKeyB64` value has an explicit pre-encoded contract: it must be
-the base64 encoding of the complete raw OpenSSH public-key text. The template
-passes that value through unchanged because the cloud-init `write_files`
-entry declares `encoding: b64` and performs the decoding in the guest.
+- Required: `vmDataVolumeSource`, a non-empty mapping that identifies a real
+  caller-owned image, and `sshPublicKeyB64`, the base64 encoding of the complete
+  raw OpenSSH public-key text as a non-empty string. Rendering reports either
+  missing value and rejects empty or basic-type mismatches instead of
+  substituting an empty image source or SSH key.
+- Defaultable: `vmName` (`vm-img--windows`), `vmNS` (`default`),
+  `vmDataVolumeName` (`vmName + '--vhd--00-system'`), `vmStorageSize` (`96Gi`),
+  `vmStorageClass` (`gp3-csi`), `vmCpuCores` (`4`), and `vmMemory` (`8Gi`).
+
+The `96Gi` and `gp3-csi` values reproduce the source example; they do not
+assert that `gp3-csi` exists on every cluster. Callers must override capacity
+or storage class when their target cluster requires different values.
+
+Caller-owned string fields are converted to strings and JSON-serialized before
+being embedded in YAML. For example, Namespace is rendered without outer YAML
+quotes in the template source:
+```yaml
+namespace: {{vmNS | default('default') | string | tojson}}
+```
+This preserves YAML-looking values such as `123`, `true`, and `null` as strings
+and escapes quotes, backslashes, newlines, and control characters once. The
+conversion defines representation, not Kubernetes domain validity. The
+DataVolume name is resolved once and used for both its metadata and the VM
+volume reference. VM layout identifiers such as `vhd--00-fs-rootfs`,
+`cloud-init-disk`, `nic--0`, and `tablet` are fixed structural values, not
+context knobs.
+
+Structured image-source data is serialized without string conversion, so
+nested mappings, lists, Booleans, and null values retain their native types.
+CPU cores must be a positive integer and are serialized as a native number.
+The pre-encoded `sshPublicKeyB64` value is passed through unchanged because the
+cloud-init `write_files` entry declares `encoding: b64` and performs the
+decoding in the guest.
+
+These template-local checks intentionally stop at basic shape and type. The
+caller remains responsible for the CDI source schema and supported backend,
+Kubernetes quantity grammar, storage-class existence, whether converted names
+meet Kubernetes naming rules, and whether `sshPublicKeyB64` is valid base64
+that decodes to an OpenSSH public key. No image URL, source credential, or SSH
+key is fabricated by the template, so the defaultable fields alone are not
+enough to provision a VM.
 
 
 ## Getting Started

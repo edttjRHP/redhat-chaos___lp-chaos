@@ -1,0 +1,144 @@
+# Required caller context (camelCase):
+#   - vmDataVolumeSource:
+#       A non-empty mapping containing a valid CDI `DataVolume.spec.source`.
+#   - sshPublicKeyB64:
+#       A non-empty Base64-encoded OpenSSH public-key string for guest access.
+{% if (vmDataVolumeSource is not defined) %}
+    {{ {}['vmDataVolumeSource is required'].fail }}
+{% elif (vmDataVolumeSource is not mapping or not vmDataVolumeSource) %}
+    {{ {}['vmDataVolumeSource must be a non-empty mapping'].fail }}
+{% endif %}
+{% if (sshPublicKeyB64 is not defined) %}
+    {{ {}['sshPublicKeyB64 is required'].fail }}
+{% elif (sshPublicKeyB64 is not string or not (sshPublicKeyB64 | trim)) %}
+    {{ {}['sshPublicKeyB64 must be a non-empty string'].fail }}
+{% endif %}
+{% if (vmCpuCores is defined and (vmCpuCores is not integer or vmCpuCores <= 0)) %}
+    {{ {}['vmCpuCores must be a positive integer'].fail }}
+{% endif %}
+{% set vmName = vmName | default('vm-img--windows') | string %}
+{% set vmDataVolumeName = vmDataVolumeName | default(vmName + '--vhd--00-system') | string %}
+{% set vmCpuCores = vmCpuCores | default(4) %}
+{% set vmName = vmName | tojson %}
+{% set vmNS = vmNS | default('default') | string | tojson %}
+{% set vmDataVolumeName = vmDataVolumeName | tojson %}
+{% set vmDataVolumeSource = vmDataVolumeSource | tojson %}
+{% set vmStorageSize = vmStorageSize | default('96Gi') | string | tojson %}
+{% set vmStorageClass = vmStorageClass | default('gp3-csi') | string | tojson %}
+{% set sshPublicKeyB64 = sshPublicKeyB64 | string | tojson %}
+{% set vmCpuCores = vmCpuCores | tojson %}
+{% set vmMemory = vmMemory | default('8Gi') | string | tojson %}
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: {{ vmName }}
+  namespace: {{ vmNS }}
+  labels:
+    usrMeta.vmGroup: {{ vmName }}
+spec:
+  dataVolumeTemplates:
+    - apiVersion: cdi.kubevirt.io/v1beta1
+      kind: DataVolume
+      metadata:
+        annotations:
+          cdi.kubevirt.io/storage.bind.immediate.requested: "true"
+        name: {{ vmDataVolumeName }}
+        labels:
+          usrMeta.volGroup: {{ vmName }}
+      spec:
+        source: {{ vmDataVolumeSource }}
+        storage:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: {{ vmStorageSize }}
+          storageClassName: {{ vmStorageClass }}
+  runStrategy: Manual
+  template:
+    metadata:
+      labels:
+        kubevirt.io/domain: {{ vmName }}
+        kubevirt.io/vm: {{ vmName }}
+    spec:
+      architecture: amd64
+      domain:
+        clock:
+          timer:
+            hyperv:
+              present: true
+        cpu:
+          cores: {{ vmCpuCores }}
+          sockets: 1
+          threads: 1
+        devices:
+          autoattachPodInterface: false
+          disks:
+            - bootOrder: 1
+              disk:
+                bus: virtio
+              name: vhd--00-fs-rootfs
+            - cdrom:
+                bus: sata
+              name: cloud-init-disk
+          inputs:
+            - bus: usb
+              name: tablet
+              type: tablet
+          interfaces:
+            - masquerade: {}
+              model: virtio
+              name: nic--0
+          networkInterfaceMultiqueue: true
+          tpm: {}
+        features:
+          hyperv:
+            frequencies: {}
+            ipi: {}
+            reenlightenment: {}
+            relaxed: {}
+            reset: {}
+            runtime: {}
+            spinlocks:
+              enabled: true
+              spinlocks: 8191
+            synic: {}
+            synictimer:
+              direct: {}
+            tlbflush: {}
+            vapic: {}
+            vpindex: {}
+          smm: {}
+        firmware:
+          bootloader:
+            efi:
+              secureBoot: true
+        machine:
+          type: q35
+        memory:
+          guest: {{ vmMemory }}
+        resources:
+          limits:
+            memory: {{ vmMemory }}
+          requests:
+            memory: {{ vmMemory }}
+      networks:
+        - name: nic--0
+          pod: {}
+      volumes:
+        - dataVolume:
+            name: {{ vmDataVolumeName }}
+          name: vhd--00-fs-rootfs
+        - cloudInitNoCloud:
+            userData: |
+                #cloud-config
+                runcmd:
+                  - powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command "
+                        $s = \"${env:ProgramData}\Scripts\Script--App--CloudBaseInit--Main.ps1\";
+                        if (Test-Path -Path $s) {& $s}
+                    "
+                write_files:
+                  - path: C:\ProgramData\Scripts\Data--App--CloudBaseInit--SSH.txt
+                    encoding: b64
+                    content: {{ sshPublicKeyB64 }}
+          name: cloud-init-disk

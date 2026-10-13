@@ -50,12 +50,65 @@ therefore be reviewed before running anything beyond collection.
   portable acceptance suite.
 - benchmark-runner is used by the framework but is not pinned in
   `requirements.txt`.
-- The template-based provisioning example expects a template name that is not
-  present under `conf/` at this ref; the included VM template must be selected
-  explicitly before that path can run.
+- The template-based provisioning example requires deployment-specific VM
+  template context before that path can run.
 - The implemented krkn-lib scenarios cover launcher-pod recovery and a
   non-destructive host inspection. Fault injection that targets BSOD behavior
   remains future work.
+
+
+### VM Template Context
+
+`conf/config--vm--template.yaml` is rendered with caller-owned `ctxData`; the
+framework does not provide a default context file. Template context keys use
+camelCase and preserve the established `vmName` and `vmNS` names. Its complete
+context interface is:
+
+- Required: `vmDataVolumeSource`, a non-empty mapping that identifies a real
+  caller-owned image, and `sshPublicKeyB64`, the base64 encoding of the complete
+  raw OpenSSH public-key text as a non-empty string. Rendering reports either
+  missing value and rejects empty or basic-type mismatches instead of
+  substituting an empty image source or SSH key.
+- Defaultable: `vmName` (`vm-img--windows`), `vmNS` (`default`),
+  `vmDataVolumeName` (`vmName + '--vhd--00-system'`), `vmStorageSize` (`96Gi`),
+  `vmStorageClass` (`gp3-csi`), `vmCpuCores` (`4`), and `vmMemory` (`8Gi`).
+
+The `96Gi` and `gp3-csi` values reproduce the source example; they do not
+assert that `gp3-csi` exists on every cluster. Callers must override capacity
+or storage class when their target cluster requires different values.
+
+Raw caller inputs are checked before defaulting or conversion. All defaults,
+native preparation, and serialization then form one initialization block.
+Caller-owned string fields are converted and JSON-serialized once during
+template initialization. Manifest expressions then reuse the prepared value:
+```yaml
+{% set vmNS = vmNS | default('default') | string | tojson %}
+...
+namespace: {{ vmNS }}
+```
+This preserves YAML-looking values such as `123`, `true`, and `null` as strings
+and escapes quotes, backslashes, newlines, and control characters once. The
+conversion defines representation, not Kubernetes domain validity. The
+DataVolume name is derived from the native VM name before either value is
+serialized, then reused for both its metadata and the VM volume reference. VM
+layout identifiers such as `vhd--00-fs-rootfs`,
+`cloud-init-disk`, `nic--0`, and `tablet` are fixed structural values, not
+context knobs.
+
+Structured image-source data is serialized without string conversion, so
+nested mappings, lists, Booleans, and null values retain their native types.
+CPU cores must be a positive integer and are serialized as a native number.
+The pre-encoded `sshPublicKeyB64` value is passed through unchanged because the
+cloud-init `write_files` entry declares `encoding: b64` and performs the
+decoding in the guest.
+
+These template-local checks intentionally stop at basic shape and type. The
+caller remains responsible for the CDI source schema and supported backend,
+Kubernetes quantity grammar, storage-class existence, whether converted names
+meet Kubernetes naming rules, and whether `sshPublicKeyB64` is valid base64
+that decodes to an OpenSSH public key. No image URL, source credential, or SSH
+key is fabricated by the template, so the defaultable fields alone are not
+enough to provision a VM.
 
 
 ## Getting Started

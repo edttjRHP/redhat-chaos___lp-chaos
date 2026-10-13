@@ -42,9 +42,15 @@ a chaos scenario may intentionally disrupt a selected existing resource.
 The example suite covers template-based VM creation and guest file or command
 access, multi-VM provisioning through benchmark-runner, launcher-pod recovery,
 and read-only worker-node inspection. Some example values and local file
-operations are environment-specific. In addition, the default template name
-used by the template-provisioning path is not present in the current `conf/`
-directory, so that example needs explicit configuration before execution.
+operations are environment-specific. The template-provisioning path also needs
+caller-owned image-source and pre-base64-encoded SSH public-key context before
+execution. Identity, storage, memory, and CPU have documented deployment
+defaults, but the example storage class is not guaranteed to exist on every
+cluster. Template validation covers required presence, source shape, SSH-key
+type, and a positive native CPU integer; deployment schema and content validity
+remain caller responsibilities. The exact nine-key context interface and fixed
+VM layout are documented in the
+[framework README](../README.md#vm-template-context).
 
 No current PyTest scenario completes an end-to-end BSOD workflow. In
 particular, crash injection, guest-side detection, evidence collection, and

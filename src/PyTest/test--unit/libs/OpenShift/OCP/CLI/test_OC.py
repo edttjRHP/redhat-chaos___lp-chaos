@@ -39,7 +39,7 @@ def test_NewRes_FromYAMLrunsAllPhases() -> None:
         Result(True, 'ready'),
     ]
 
-    phase, final = cli.NewRes('kind: VirtualMachine', waitTime='5m')
+    (phase, final) = cli.NewRes('kind: VirtualMachine', waitTime='5m')
 
     assert phase == MUT.OCcli.ResPhase.WAITED
     assert final.stdout == 'ready'
@@ -70,7 +70,7 @@ def test_NewRes_FromSubcommandMergesOptions() -> None:
         Result(True, 'secret/name created'),
     ]
 
-    phase, final = cli.NewRes(
+    (phase, final) = cli.NewRes(
         {
             'subCmd': 'secret generic',
             'args': ['name'],
@@ -98,7 +98,7 @@ def test_NewRes_SubcommandDefaultsOptionalCollections() -> None:
     cli = BuildCLI()
     cli.Run.side_effect = [Result(False, stderr='invalid')]
 
-    phase, final = cli.NewRes({'subCmd': 'namespace'})
+    (phase, final) = cli.NewRes({'subCmd': 'namespace'})
 
     assert phase == MUT.OCcli.ResPhase.DRY_RUN
     assert final.stderr == 'invalid'
@@ -117,7 +117,7 @@ def test_NewRes_StopsOnApplyFailure() -> None:
         Result(False, stderr='apply failed'),
     ]
 
-    phase, final = cli.NewRes('yaml')
+    (phase, final) = cli.NewRes('yaml')
 
     assert phase == MUT.OCcli.ResPhase.APPLIED
     assert not final.success
@@ -127,7 +127,7 @@ def test_NewRes_StopsWhenApplyHasNoResourceReference() -> None:
     cli = BuildCLI()
     cli.Run.side_effect = [Result(True, 'yaml'), Result(True, '   ')]
 
-    phase, final = cli.NewRes('yaml')
+    (phase, final) = cli.NewRes('yaml')
 
     assert phase == MUT.OCcli.ResPhase.APPLIED
     assert final.success
@@ -139,12 +139,12 @@ def test_DelRes_FailureAndSuccess() -> None:
     failure = Result(False, stderr='denied')
     cli.Run.return_value = failure
 
-    phase, final = cli.DelRes('Pod/name')
+    (phase, final) = cli.DelRes('Pod/name')
     assert (phase, final) == (MUT.OCcli.ResPhase.DELETED, failure)
 
     cli.Run.reset_mock()
     cli.Run.side_effect = [Result(True), Result(True, 'gone')]
-    phase, final = cli.DelRes('Pod/name', waitTime='3m')
+    (phase, final) = cli.DelRes('Pod/name', waitTime='3m')
     assert phase == MUT.OCcli.ResPhase.WAITED
     assert final.stdout == 'gone'
     assert cli.Run.call_args_list == [

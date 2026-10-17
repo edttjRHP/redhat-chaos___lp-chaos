@@ -6,7 +6,7 @@ from unittest import mock
 
 import pytest
 
-from fixtures.KrknLib import ExecOnNode, KrnChaos
+import fixtures.KrknLib as MUT
 from libs.CustomTypes import NamedDict
 
 
@@ -55,7 +55,7 @@ def PatchKrknModules(
     monkeypatch: pytest.MonkeyPatch,
     clientType: mock.MagicMock,
 ) -> None:
-    for name, module in KrknModules(clientType).items():
+    for (name, module) in KrknModules(clientType).items():
         monkeypatch.setitem(sys.modules, name, module)
 
 
@@ -63,7 +63,7 @@ def test_ExecOnNode_ExecutesInPrivilegedPodAndCleansBeforeAndAfter() -> None:
     client = KrknClient()
     client.exec_cmd_in_pod.return_value = 'kernel output'
 
-    result = ExecOnNode(
+    result = MUT.ExecOnNode(
         client,
         'worker-1',
         'helper',
@@ -98,7 +98,7 @@ def test_ExecOnNode_ExecutesInPrivilegedPodAndCleansBeforeAndAfter() -> None:
     ]
 
 
-def test_ExecOnNode_OriginalExecutionExceptionIdentitySurvivesFinalCleanupFailure(
+def test_ExecOnNode_ExecutionExceptionIdentitySurvivesFinalCleanupFailure(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     client = KrknClient()
@@ -107,7 +107,7 @@ def test_ExecOnNode_OriginalExecutionExceptionIdentitySurvivesFinalCleanupFailur
     client.delete_pod.side_effect = [None, RuntimeError('cleanup failed')]
 
     with caplog.at_level('WARNING'), pytest.raises(RuntimeError) as raised:
-        ExecOnNode(client, 'worker', 'helper', 'command')
+        MUT.ExecOnNode(client, 'worker', 'helper', 'command')
 
     assert raised.value is executionError
     podConfig = client.create_pod.call_args.args[0]
@@ -131,7 +131,7 @@ def test_ExecOnNode_CleanupFailuresAreBestEffort(
     client.exec_cmd_in_pod.return_value = 'output'
 
     with caplog.at_level('WARNING'):
-        result = ExecOnNode(client, 'node', 'pod', 'command')
+        result = MUT.ExecOnNode(client, 'node', 'pod', 'command')
 
     assert result == 'output'
     assert client.delete_pod.call_count == 2
@@ -143,7 +143,7 @@ def test_ExecOnNode_CreateFailureStillCleansUp() -> None:
     client.create_pod.side_effect = RuntimeError('create failed')
 
     with pytest.raises(RuntimeError, match='create failed'):
-        ExecOnNode(client, 'node', 'pod', 'command')
+        MUT.ExecOnNode(client, 'node', 'pod', 'command')
 
     assert client.delete_pod.call_count == 2
     client.exec_cmd_in_pod.assert_not_called()
@@ -170,7 +170,7 @@ def test_KrnChaos_BuildsContextFromOverridesAndFinishesTeardown(
         },
     )
 
-    generator = KrnChaos.__wrapped__(
+    generator = MUT.KrnChaos.__wrapped__(
         request=request,
         fxtOCcli=ocFactory,
         fxtVirtCtlCLI=virtCtlFactory,
@@ -195,21 +195,91 @@ def test_KrnChaos_BuildsContextFromOverridesAndFinishesTeardown(
         next(generator)
 
 
+@pytest.mark.parametrize(
+    'overrides, namespace, image',
+    [
+        ({}, 'custom-ns', 'configured-image'),
+        ({'ns': 'call-ns'}, 'call-ns', 'configured-image'),
+        ({'ctrImg': 'call-image'}, 'custom-ns', 'call-image'),
+        ({'ns': 'call-ns', 'ctrImg': 'call-image'}, 'call-ns', 'call-image'),
+    ],
+)
+@pytest.mark.parametrize('executionFails', [False, True])
+def test_KrnChaos_ExecOnNodeUsesConfiguredDefaultsAndCallOverrides(
+    monkeypatch: pytest.MonkeyPatch,
+    overrides: dict[str, str],
+    namespace: str,
+    image: str,
+    executionFails: bool,
+) -> None:
+    clientType = mock.create_autospec(KrknClientStub)
+    client = clientType.return_value
+    client.exec_cmd_in_pod.return_value = 'output'
+    PatchKrknModules(monkeypatch, clientType)
+    generator = MUT.KrnChaos.__wrapped__(
+        request=SimpleNamespace(param={
+            'ns': 'custom-ns', 'ctrImgURL_ExecNode': 'configured-image',
+        }),
+        fxtOCcli=mock.MagicMock(),
+        fxtVirtCtlCLI=mock.MagicMock(),
+    )
+    context = next(generator)
+
+    if executionFails:
+        client.exec_cmd_in_pod.side_effect = RuntimeError('execution failed')
+        with pytest.raises(RuntimeError, match='execution failed'):
+            context.ExecOnNode('node', 'owned-helper', 'uname -r', **overrides)
+    else:
+        assert context.ExecOnNode(
+            'node', 'owned-helper', 'uname -r', **overrides,
+        ) == 'output'
+
+    podConfig = client.create_pod.call_args.args[0]
+    assert podConfig['spec']['containers'][0]['image'] == image
+    client.create_pod.assert_called_once_with(podConfig, namespace, 120)
+    client.exec_cmd_in_pod.assert_called_once_with(
+        ['uname -r'], 'owned-helper', namespace,
+    )
+    assert client.delete_pod.call_args_list == [
+        mock.call('owned-helper', namespace),
+        mock.call('owned-helper', namespace),
+    ]
+    with pytest.raises(StopIteration):
+        next(generator)
+
+
 @pytest.mark.parametrize('hasRequestParam', [False, True])
 def test_KrnChaos_UsesDefaultConfigurationWithAbsentOrEmptyRequestParam(
     monkeypatch: pytest.MonkeyPatch,
     hasRequestParam: bool,
 ) -> None:
-    request = SimpleNamespace(param={}) if hasRequestParam else SimpleNamespace()
+    request = (
+        SimpleNamespace(param={}) if hasRequestParam else SimpleNamespace()
+    )
     clientType = mock.create_autospec(KrknClientStub)
     PatchKrknModules(monkeypatch, clientType)
     ocFactory = mock.MagicMock()
     virtCtlFactory = mock.MagicMock()
 
-    generator = KrnChaos.__wrapped__(request, ocFactory, virtCtlFactory)
+    generator = MUT.KrnChaos.__wrapped__(request, ocFactory, virtCtlFactory)
     context = next(generator)
     with pytest.raises(StopIteration):
         next(generator)
+
+    client = clientType.return_value
+    client.exec_cmd_in_pod.return_value = 'default-output'
+    assert context.ExecOnNode(
+        'node', 'owned-helper', 'uname -r',
+    ) == 'default-output'
+    podConfig = client.create_pod.call_args.args[0]
+    assert (
+        podConfig['spec']['containers'][0]['image'] ==
+        MUT._DEF__FXT_CFG.ctrImgURL_ExecNode
+    )
+    client.create_pod.assert_called_once_with(podConfig, 'default', 120)
+    client.exec_cmd_in_pod.assert_called_once_with(
+        ['uname -r'], 'owned-helper', 'default',
+    )
 
     assert context.ns == 'default'
     ocFactory.assert_called_once_with(ns='default')

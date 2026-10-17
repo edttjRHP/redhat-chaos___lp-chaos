@@ -44,7 +44,7 @@ def test_CleanUpVMs_HandlesEveryOwnershipOutcome(
     goodVM = SimpleNamespace(name='good', RmvSSH=mock.MagicMock())
     badVM = SimpleNamespace(name='bad', RmvSSH=mock.MagicMock())
     badVM.RmvSSH.side_effect = RuntimeError('close failed')
-    lookupFail, absent, changed, deleteFail, deleted, lookupException = (
+    (lookupFail, absent, changed, deleteFail, deleted, lookupException) = (
         OCmock() for _ in range(6)
     )
     MUT.VM.GetVMuid.side_effect = [
@@ -130,7 +130,9 @@ def test_Init_CreatesDefaultClients(monkeypatch: pytest.MonkeyPatch) -> None:
     assert vm.cli.virtCtl is MUT.VirtCtlCLI.return_value
 
 
-def test__Status_ReturnsValueOnlyForSuccess(virtualMachine: Utils.VMcontext) -> None:
+def test__Status_ReturnsValueOnlyForSuccess(
+    virtualMachine: Utils.VMcontext,
+) -> None:
     virtualMachine.oc.Run.return_value = CommandResult(True, "'Running'")
     assert virtualMachine.vm._Status() == 'Running'
     virtualMachine.oc.Run.assert_called_once_with(
@@ -212,6 +214,7 @@ def test_NewSSH_UsesDefaultsAndProbes(
         host='vm-one',
         user='qa-usr',
         idFile='~/.ssh/id_ed25519',
+        virtCtl=virtualMachine.virtCtl,
     )
     connection.Probe.assert_called_once_with(timeout=12)
 
@@ -228,6 +231,7 @@ def test_NewSSH_AllowsOverrides(
         user='override',
         idFile='/override',
         ctrlPersist='1h',
+        virtCtl=None,
     )
 
     MUT.RHOVsshCon.assert_called_once_with(
@@ -236,6 +240,7 @@ def test_NewSSH_AllowsOverrides(
         user='override',
         idFile='/override',
         ctrlPersist='1h',
+        virtCtl=None,
     )
 
 
@@ -252,6 +257,35 @@ def test_NewSSH_TimeoutRaisesAndDoesNotCache(
 
     connection.Probe.assert_called_once_with(timeout=7)
     assert virtualMachine.vm._ssh is None
+
+
+def test_ssh_UsesSelectedClientAndCachesConnection(
+    monkeypatch: pytest.MonkeyPatch,
+    virtualMachine: Utils.VMcontext,
+) -> None:
+    Utils.AutoPatch(monkeypatch, RHOVsshCon, 'Probe')
+    RHOVsshCon.Probe.return_value = True
+
+    connection = virtualMachine.vm.ssh
+
+    assert connection.virtCtl is virtualMachine.virtCtl
+    assert connection.ns == virtualMachine.vm.namespace
+    assert virtualMachine.vm.ssh is connection
+    RHOVsshCon.Probe.assert_called_once_with(connection, timeout=300)
+
+
+def test_NewSSH_PreservesExplicitClientOverride(
+    monkeypatch: pytest.MonkeyPatch,
+    virtualMachine: Utils.VMcontext,
+) -> None:
+    Utils.AutoPatch(monkeypatch, RHOVsshCon, 'Probe')
+    RHOVsshCon.Probe.return_value = True
+    otherClient = mock.MagicMock()
+
+    connection = virtualMachine.vm.NewSSH(virtCtl=otherClient)
+
+    assert connection.virtCtl is otherClient
+    assert virtualMachine.vm.cli.virtCtl is virtualMachine.virtCtl
 
 
 def test_ssh_RetriesAfterTimeoutWithoutCachingFailure(
@@ -274,12 +308,16 @@ def test_ssh_RetriesAfterTimeoutWithoutCachingFailure(
     assert MUT.RHOVsshCon.call_count == 2
 
 
-def test_RmvSSH_IsNoopWithoutConnection(virtualMachine: Utils.VMcontext) -> None:
+def test_RmvSSH_IsNoopWithoutConnection(
+    virtualMachine: Utils.VMcontext,
+) -> None:
     virtualMachine.vm.RmvSSH()
     assert virtualMachine.vm._ssh is None
 
 
-def test_RmvSSH_ClosesAndClearsConnection(virtualMachine: Utils.VMcontext) -> None:
+def test_RmvSSH_ClosesAndClearsConnection(
+    virtualMachine: Utils.VMcontext,
+) -> None:
     connection = mock.create_autospec(RHOVsshCon, instance=True)
     virtualMachine.vm._ssh = connection
 

@@ -115,5 +115,7 @@ def test_Run_ZeroAttemptsReturnsMaxTriesFailure(
 
     result = MUT.CmdExec().Run(['tool'], tryMax=0)
 
-    assert result == MUT.CmdRes('', 'Max. execution tries exceeded.', -3, False)
+    assert result == MUT.CmdRes(
+        '', 'Max. execution tries exceeded.', -3, False,
+    )
     MUT.subprocess.run.assert_not_called()

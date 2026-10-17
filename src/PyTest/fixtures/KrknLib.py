@@ -48,7 +48,8 @@ class KrknContext(NamedTuple):
           - virtCtl: A `VirtCtlCLI` instance.
       - ExecOnNode:
         Helper function `ExecOnNode(node, podName, command, ...)`, bound to
-        `krknClient`.
+        `krknClient`, configured namespace and helper image. Keyword arguments
+        `ns` and `ctrImg` override those defaults per call.
     '''
     krknClient: Any
     krknPars: NamedDict
@@ -59,13 +60,13 @@ class KrknContext(NamedTuple):
 
 
 def ExecOnNode(
-    krknClient,
-    node,
-    podName,
-    command,
-    ns=_DEF__FXT_CFG.ns,
-    ctrImg=_DEF__FXT_CFG.ctrImgURL_ExecNode,
-    timeout=120
+    krknClient: Any,
+    node: str,
+    podName: str,
+    command: str,
+    ns: str = _DEF__FXT_CFG.ns,
+    ctrImg: str = _DEF__FXT_CFG.ctrImgURL_ExecNode,
+    timeout: Any = 120
 ) -> str:
     '''
     Run a shell command on a Node via a transient privileged pod, using
@@ -76,7 +77,8 @@ def ExecOnNode(
         (b) waits 500s before failing, and
         (c) never deletes the pod.
     Here we build the same privileged/hostNetwork/dbus pod but with a pullable
-    image, a short timeout, and guaranteed cleanup.
+    image, a short timeout, and best-effort cleanup in `finally`. Deletion
+    failures are logged and suppressed, so the helper Pod may remain.
 
     :param command:
         The command as a single shell string (e.g. 'uname -r').
@@ -176,7 +178,9 @@ def KrnChaos(
               - oc: A `OCcli` instance.
               - virtCtl: A `VirtCtlCLI` instance.
           - ns: Kubernetes Namespace.
-          - ExecOnNode: Node execution helper bound to `krknClient`.
+          - ExecOnNode: Node execution helper bound to `krknClient`, configured
+                        `ns` and `ctrImgURL_ExecNode`; per-call `ns` and
+                        `ctrImg` keyword arguments override these defaults.
     '''
     # Import lazily so the TCs are still collected if these modules are absent.
     from krkn_lib.ocp import KrknOpenshift
@@ -197,7 +201,10 @@ def KrnChaos(
             virtCtl=fxtVirtCtlCLI(ns=fxtCfg.ns, **fxtCfg.cliCfg.vcCfg),
         ),
         ns=fxtCfg.ns,
-        ExecOnNode=partial(ExecOnNode, krknClient),
+        ExecOnNode=partial(
+            ExecOnNode, krknClient,
+            ns=fxtCfg.ns, ctrImg=fxtCfg.ctrImgURL_ExecNode,
+        ),
     )
 
     logs.info('The `krknChaos` fixture teardown complete.')

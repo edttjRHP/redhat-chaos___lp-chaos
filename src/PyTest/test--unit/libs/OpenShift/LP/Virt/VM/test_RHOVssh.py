@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -11,6 +12,19 @@ def CommandResult(success: bool, stderr: str = '') -> CmdRes:
     return CmdRes('', stderr, 0 if success else 1, success)
 
 
+def test_Init_IsolatesControlSocketsByNamespace(
+    rhovConnection: Utils.RHOVconnectionContext,
+) -> None:
+    first = rhovConnection.connection
+    second = MUT.RHOVsshCon(
+        'other-ns', first.host, first.user, first.idFile,
+        virtCtl=rhovConnection.virtCtl, cmdExec=rhovConnection.cmdExec,
+    )
+
+    assert second.ctrlPath == '/tmp/ssh..user@vm-one.other-ns..sock'
+    assert first.ctrlPath != second.ctrlPath
+
+
 def test_Init_UsesSuppliedCollaboratorsAndExpandsIdentityPath(
     rhovConnection: Utils.RHOVconnectionContext,
 ) -> None:
@@ -21,7 +35,7 @@ def test_Init_UsesSuppliedCollaboratorsAndExpandsIdentityPath(
     assert connection.user == 'user'
     assert connection.idFile == str(Path('~/key').expanduser())
     assert connection.target == 'user@vm-one'
-    assert connection.ctrlPath == '/tmp/ssh..user@vm-one..sock'
+    assert connection.ctrlPath == '/tmp/ssh..user@vm-one.namespace..sock'
     assert connection.virtCtl is rhovConnection.virtCtl
     assert connection.cmdExec is rhovConnection.cmdExec
 
@@ -46,7 +60,9 @@ def test_Init_CreatesDefaultsWithExplicitKubeconfig(
     assert connection.cmdExec is MUT.CmdExec.return_value
 
 
-def test_Init_ReadsKubeconfigEnvironment(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_Init_ReadsKubeconfigEnvironment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv('KUBECONFIG', '/from-env')
     Utils.AutoPatch(monkeypatch, MUT, 'VirtCtlCLI')
     Utils.AutoPatch(monkeypatch, MUT, 'CmdExec')
@@ -80,7 +96,7 @@ def test_IsAlive_ReturnsCommandSuccess(
             '-O',
             'check',
             '-o',
-            'ControlPath=/tmp/ssh..user@vm-one..sock',
+            'ControlPath=/tmp/ssh..user@vm-one.namespace..sock',
             'muxSock',
         ]
     )
@@ -122,7 +138,7 @@ def test_Connect_ClosesStaleSocketAndOpensTunnel(
         '-t',
         '-o ControlMaster=yes',
         '-t',
-        '-o ControlPath=/tmp/ssh..user@vm-one..sock',
+        '-o ControlPath=/tmp/ssh..user@vm-one.namespace..sock',
         '-t',
         '-o ControlPersist=2h',
         '-t',
@@ -160,7 +176,7 @@ def test_Close_RequestsControlMasterExit(
             '-O',
             'exit',
             '-o',
-            'ControlPath=/tmp/ssh..user@vm-one..sock',
+            'ControlPath=/tmp/ssh..user@vm-one.namespace..sock',
             'muxSock',
         ]
     )
@@ -174,7 +190,7 @@ def test_Probe_RetriesThenSucceeds(
     Utils.AutoPatch(monkeypatch, MUT.RHOVsshCon, 'Close')
     Utils.AutoPatch(monkeypatch, MUT.time, 'monotonic')
     Utils.AutoPatch(monkeypatch, MUT.time, 'sleep')
-    MUT.time.monotonic.side_effect = [10, 11, 12]
+    MUT.time.monotonic.side_effect = [10, 11, 12, 13]
     MUT.RHOVsshCon.Connect.side_effect = [RuntimeError('not ready'), None]
 
     assert rhovConnection.connection.Probe(timeout=5, interval=2)
@@ -195,6 +211,153 @@ def test_Probe_ReturnsFalseAfterTimeout(
     MUT.RHOVsshCon.Connect.assert_not_called()
 
 
+@pytest.mark.parametrize('field', ['timeout', 'interval'])
+@pytest.mark.parametrize(
+    'value',
+    [
+        False, None, '1', 'bad', [], {}, 1j, 0, 0.0, -1, -0.5,
+        float('nan'),
+    ],
+)
+def test_Probe_RejectsInvalidTimingBeforeConnection(
+    monkeypatch: pytest.MonkeyPatch,
+    rhovConnection: Utils.RHOVconnectionContext,
+    probeClock: Utils.FakeClock,
+    field: str,
+    value: object,
+) -> None:
+    Utils.AutoPatch(monkeypatch, MUT.RHOVsshCon, 'Connect')
+    Utils.AutoPatch(monkeypatch, MUT.RHOVsshCon, 'Close')
+
+    with pytest.raises(
+        ValueError, match=f'^{field} must be a positive number',
+    ):
+        rhovConnection.connection.Probe(**{field: value})
+
+    MUT.RHOVsshCon.Connect.assert_not_called()
+    MUT.RHOVsshCon.Close.assert_not_called()
+    MUT.time.monotonic.assert_not_called()
+    MUT.time.sleep.assert_not_called()
+    rhovConnection.cmdExec.Run.assert_not_called()
+    rhovConnection.virtCtl.Run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ('timeout', 'interval'), [(5, 2), (0.5, 0.125), (True, 0.25), (2, True)],
+)
+def test_Probe_AcceptsPositiveTimingAndPreservesSuccess(
+    monkeypatch: pytest.MonkeyPatch,
+    rhovConnection: Utils.RHOVconnectionContext,
+    probeClock: Utils.FakeClock,
+    timeout: int | float,
+    interval: int | float,
+) -> None:
+    Utils.AutoPatch(monkeypatch, MUT.RHOVsshCon, 'Connect')
+    Utils.AutoPatch(monkeypatch, MUT.RHOVsshCon, 'Close')
+    MUT.RHOVsshCon.Connect.side_effect = [RuntimeError('not ready'), None]
+
+    assert rhovConnection.connection.Probe(timeout, interval) is True
+    assert MUT.RHOVsshCon.Connect.call_count == 2
+    MUT.RHOVsshCon.Close.assert_called_once_with(rhovConnection.connection)
+    MUT.time.sleep.assert_called_once_with(interval)
+    assert probeClock.now == 10 + interval
+
+
+def test_Probe_CapsSleepToRemainingTimeout(
+    monkeypatch: pytest.MonkeyPatch,
+    rhovConnection: Utils.RHOVconnectionContext,
+    probeClock: Utils.FakeClock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    Utils.AutoPatch(monkeypatch, MUT.RHOVsshCon, 'Connect')
+    Utils.AutoPatch(monkeypatch, MUT.RHOVsshCon, 'Close')
+    MUT.RHOVsshCon.Connect.side_effect = RuntimeError('not ready')
+
+    assert rhovConnection.connection.Probe(timeout=0.5, interval=2) is False
+    MUT.time.sleep.assert_called_once_with(0.5)
+    MUT.RHOVsshCon.Connect.assert_called_once_with(rhovConnection.connection)
+    MUT.RHOVsshCon.Close.assert_not_called()
+    assert probeClock.now == 10.5
+    assert 'SSH probe timeout on user@vm-one after 0.5s' in caplog.text
+
+
+def test_Probe_CapsFinalSleepAfterMultipleFailedAttempts(
+    monkeypatch: pytest.MonkeyPatch,
+    rhovConnection: Utils.RHOVconnectionContext,
+    probeClock: Utils.FakeClock,
+) -> None:
+    Utils.AutoPatch(monkeypatch, MUT.RHOVsshCon, 'Connect')
+    Utils.AutoPatch(monkeypatch, MUT.RHOVsshCon, 'Close')
+    MUT.RHOVsshCon.Connect.side_effect = RuntimeError('not ready')
+
+    assert rhovConnection.connection.Probe(timeout=2.5, interval=1) is False
+    assert MUT.time.sleep.call_args_list == [
+        mock.call(1), mock.call(1), mock.call(0.5),
+    ]
+    assert MUT.RHOVsshCon.Connect.call_args_list == [
+        mock.call(rhovConnection.connection),
+    ] * 3
+    MUT.RHOVsshCon.Close.assert_not_called()
+    assert probeClock.now == 12.5
+
+
+def test_Probe_SubtractsAttemptDurationFromRetryWait(
+    monkeypatch: pytest.MonkeyPatch,
+    rhovConnection: Utils.RHOVconnectionContext,
+    probeClock: Utils.FakeClock,
+) -> None:
+    def FailedConnect(connection: MUT.RHOVsshCon) -> None:
+        probeClock.now += 0.25
+        raise RuntimeError('not ready')
+
+    Utils.AutoPatch(monkeypatch, MUT.RHOVsshCon, 'Connect')
+    MUT.RHOVsshCon.Connect.side_effect = FailedConnect
+
+    assert rhovConnection.connection.Probe(timeout=0.5, interval=2) is False
+    MUT.time.sleep.assert_called_once_with(0.25)
+    MUT.RHOVsshCon.Connect.assert_called_once_with(rhovConnection.connection)
+    assert probeClock.now == 10.5
+
+
+@pytest.mark.parametrize('attemptDuration', [0.5, 0.75])
+def test_Probe_SkipsSleepAndFurtherAttemptsAfterDeadline(
+    monkeypatch: pytest.MonkeyPatch,
+    rhovConnection: Utils.RHOVconnectionContext,
+    probeClock: Utils.FakeClock,
+    attemptDuration: float,
+) -> None:
+    def FailedConnect(connection: MUT.RHOVsshCon) -> None:
+        probeClock.now += attemptDuration
+        raise RuntimeError('not ready')
+
+    Utils.AutoPatch(monkeypatch, MUT.RHOVsshCon, 'Connect')
+    Utils.AutoPatch(monkeypatch, MUT.RHOVsshCon, 'Close')
+    MUT.RHOVsshCon.Connect.side_effect = FailedConnect
+
+    assert rhovConnection.connection.Probe(timeout=0.5, interval=2) is False
+    MUT.time.sleep.assert_not_called()
+    MUT.RHOVsshCon.Connect.assert_called_once_with(rhovConnection.connection)
+    MUT.RHOVsshCon.Close.assert_not_called()
+
+
+def test_Probe_PreservesSuccessfulAttemptThatConsumesDeadline(
+    monkeypatch: pytest.MonkeyPatch,
+    rhovConnection: Utils.RHOVconnectionContext,
+    probeClock: Utils.FakeClock,
+) -> None:
+    def SuccessfulConnect(connection: MUT.RHOVsshCon) -> None:
+        probeClock.now += 1
+
+    Utils.AutoPatch(monkeypatch, MUT.RHOVsshCon, 'Connect')
+    Utils.AutoPatch(monkeypatch, MUT.RHOVsshCon, 'Close')
+    MUT.RHOVsshCon.Connect.side_effect = SuccessfulConnect
+
+    assert rhovConnection.connection.Probe(timeout=0.5, interval=2) is True
+    MUT.RHOVsshCon.Connect.assert_called_once_with(rhovConnection.connection)
+    MUT.RHOVsshCon.Close.assert_called_once_with(rhovConnection.connection)
+    MUT.time.sleep.assert_not_called()
+
+
 def test_RunShell_ConnectsAndPassesStdin(
     monkeypatch: pytest.MonkeyPatch,
     rhovConnection: Utils.RHOVconnectionContext,
@@ -213,7 +376,7 @@ def test_RunShell_ConnectsAndPassesStdin(
             '-o',
             'ControlMaster=no',
             '-o',
-            'ControlPath=/tmp/ssh..user@vm-one..sock',
+            'ControlPath=/tmp/ssh..user@vm-one.namespace..sock',
             'muxSock',
             'hostname',
         ],
@@ -257,7 +420,7 @@ def test_Send_ConnectsExactlyOnceAndRunsSCP(
             '-o',
             'ControlMaster=no',
             '-o',
-            'ControlPath=/tmp/ssh..user@vm-one..sock',
+            'ControlPath=/tmp/ssh..user@vm-one.namespace..sock',
             '/local/file',
             'muxSock:C:/remote',
         ]
@@ -282,7 +445,7 @@ def test_Recv_ConnectsExactlyOnceAndRunsSCP(
             '-o',
             'ControlMaster=no',
             '-o',
-            'ControlPath=/tmp/ssh..user@vm-one..sock',
+            'ControlPath=/tmp/ssh..user@vm-one.namespace..sock',
             'muxSock:C:/remote',
             '/local/file',
         ]

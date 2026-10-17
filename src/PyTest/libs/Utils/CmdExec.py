@@ -17,7 +17,7 @@ class CmdRes(NamedTuple):
 class CmdExec:
     '''Execute commands locally.'''
 
-    def __init__(self, defTryMax: int = 1, tryWait: int = 5):
+    def __init__(self, defTryMax: int = 1, tryWait: int = 5) -> None:
         self.defTryMax = defTryMax
         self.tryWait = tryWait
 
@@ -25,7 +25,7 @@ class CmdExec:
         self,
         command: Union[str, List[str]],
         shell: bool = False,
-        input: Optional[str] = None,
+        input: Optional[Union[str, bytes]] = None,
         tryMax: Optional[int] = None,
         spPars: Optional[Dict] = None,
     ) -> CmdRes:
@@ -34,7 +34,9 @@ class CmdExec:
 
         :param command: Command to execute (see `subprocess` for details).
         :param shell:   True to run via shell wrapper (use with caution).
-        :param input:   Optional string piped to the process's standard input.
+        :param input:
+            Optional string, piped to the process's standard input, passed
+            through `to subprocess.run()`.
         :param tryMax:  Override the default maximum number of attempts.
         :param spPars:
             Optional `dict` of extra keyword arguments passed through
@@ -58,7 +60,9 @@ class CmdExec:
                         f'(Try {tryCnt}/{tryMax}): {result.stderr.strip()}'
                     )
                     if (tryCnt < tryMax):
-                        logs.info(f'Retrying execution in {self.tryWait} seconds...')
+                        logs.info(
+                            f'Retrying execution in {self.tryWait} seconds...'
+                        )
                         time.sleep(self.tryWait)
                         continue
                 return CmdRes(
@@ -69,14 +73,23 @@ class CmdExec:
                 )
             except (FileNotFoundError, PermissionError) as ex:
                 logs.error(f'Critical environment exception: {ex}')
-                return CmdRes(stdout='', stderr=str(ex), exitCode=-2, success=False)
+                return CmdRes(
+                    stdout='', stderr=str(ex), exitCode=-2, success=False,
+                )
             except subprocess.SubprocessError as ex:
-                logs.warning(f'Subprocess plumbing exception (Try {tryCnt}/{tryMax}): {ex}')
+                logs.warning(
+                    'Subprocess plumbing exception '
+                    f'(Try {tryCnt}/{tryMax}): {ex}'
+                )
                 if (tryCnt < tryMax):
-                    logs.info(f'Retrying execution in {self.tryWait} seconds...')
+                    logs.info(
+                        f'Retrying execution in {self.tryWait} seconds...'
+                    )
                     time.sleep(self.tryWait)
                 else:
-                    return CmdRes(stdout='', stderr=str(ex), exitCode=-2, success=False)
+                    return CmdRes(
+                        stdout='', stderr=str(ex), exitCode=-2, success=False,
+                    )
 
         return CmdRes(
             stdout='',

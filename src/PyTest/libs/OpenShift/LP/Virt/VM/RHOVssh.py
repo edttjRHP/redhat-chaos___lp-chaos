@@ -60,7 +60,7 @@ class RHOVsshCon:
             self.virtCtl = VirtCtlCLI(n=ns, **kcOpts)
         self.cmdExec = cmdExec or CmdExec()
         self.target = f'{user}@{host}'
-        self.ctrlPath = f'/tmp/ssh..{self.target}..sock'
+        self.ctrlPath = f'/tmp/ssh..{self.target}.{ns}..sock'
 
     def IsAlive(self) -> bool:
         '''
@@ -69,13 +69,17 @@ class RHOVsshCon:
         :return:    True if the master connection is alive, False otherwise.
         '''
         result = self.cmdExec.Run(
-            ['ssh', '-O', 'check', '-o', f'ControlPath={self.ctrlPath}', 'muxSock'],
+            [
+                'ssh', '-O', 'check', '-o',
+                f'ControlPath={self.ctrlPath}', 'muxSock',
+            ],
         )
         return result.success
 
     def Connect(self) -> None:
         '''
-        Establish the persistent ControlMaster connection if not already active.
+        Establish the persistent ControlMaster connection if not already
+        active.
 
         :raises RuntimeError:   If tunnel establishment fails.
         '''
@@ -103,12 +107,19 @@ class RHOVsshCon:
     def Close(self) -> None:
         '''Tear down the ControlMaster connection, if active.'''
         self.cmdExec.Run(
-            ['ssh', '-O', 'exit', '-o', f'ControlPath={self.ctrlPath}', 'muxSock'],
+            [
+                'ssh', '-O', 'exit', '-o',
+                f'ControlPath={self.ctrlPath}', 'muxSock',
+            ],
         )
 
-    def Probe(self, timeout: int = 300, interval: int = 10) -> bool:
+    def Probe(
+        self,
+        timeout: int | float = 300,
+        interval: int | float = 10,
+    ) -> bool:
         '''
-        Block until SSH is reachable or timeout expires.
+        Probe SSH readiness with a retry timeout and capped retry waits.
 
         Establishes and tears down a test connection each attempt. Does not
         leave an open ControlMaster, caller must call `Connect()` again before
@@ -116,15 +127,25 @@ class RHOVsshCon:
         check.
 
         :param timeout:
-            Maximum wait in seconds (default: `300`).
+            Positive numeric retry timeout in seconds (default: `300`).
         :param interval:
-            Wait time, in seconds, between attempts (default: `10`).
+            Positive numeric wait in seconds between attempts (default: `10`),
+            capped to the remaining retry timeout.
+        :raises ValueError:
+            If timeout or interval is not a positive number; numeric strings
+            are not accepted.
         :return:
           - True     -> VM is reachable.
           - False    -> Timeout occurs.
         '''
+        for (k, v) in locals().items():
+            if (k == 'self'): continue
+            # The `not (v > 0)` protects againt `float('nan')`.
+            if (not isinstance(v, (int, float)) or not (v > 0)):
+                raise ValueError(f'{k} must be a positive number.')
+
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        while (time.monotonic() < deadline):
             try:
                 self.Connect()
                 self.Close()
@@ -134,7 +155,8 @@ class RHOVsshCon:
                     f'SSH not ready on {self.target}, '
                     f'retrying in {interval}s...'
                 )
-                time.sleep(interval)
+                remTO = deadline - time.monotonic()
+                if (remTO > 0): time.sleep(min(interval, remTO))
         logs.warning(f'SSH probe timeout on {self.target} after {timeout}s')
         return False
 

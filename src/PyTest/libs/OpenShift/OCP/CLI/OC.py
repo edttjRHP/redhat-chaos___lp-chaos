@@ -1,6 +1,6 @@
 '''Thin shim around the `oc` CLI.'''
 from enum import auto, IntEnum
-from typing import Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 from libs.Utils.CLI import GoCobraCLI
 from libs.Utils.CmdExec import CmdExec, CmdRes
@@ -27,7 +27,7 @@ class OCcli(GoCobraCLI):
         self,
         binExec: str = 'oc',
         cmdExec: Optional[CmdExec] = None,
-        **defOpts,
+        **defOpts: Any,
     ) -> None:
         '''
         :param binExec:
@@ -90,8 +90,10 @@ class OCcli(GoCobraCLI):
             )
         else:
             # Subcommand path: oc create <subCmd> *args **opts --dry-run ...
-            createOpts = {**resOrYaml.get('opts', {}),
-                          'dry_run': 'client', 'o': 'yaml', 'save_config': True}
+            createOpts = {
+                **resOrYaml.get('opts', {}),
+                'dry_run': 'client', 'o': 'yaml', 'save_config': True,
+            }
             dryRun = self.Run(
                 f"create {resOrYaml['subCmd']}",
                 *resOrYaml.get('args', []),

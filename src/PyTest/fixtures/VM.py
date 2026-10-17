@@ -102,7 +102,7 @@ def VMcreate(
                 )
         else:
             yamlStr = YAMLcfg.Render(templPath, ctxData)
-            phase, ocRes = oc.NewRes(yamlStr, waitTime=fxtCfg.timeout)
+            (phase, ocRes) = oc.NewRes(yamlStr, waitTime=fxtCfg.timeout)
             applied = (
                 (phase.name == 'WAITED') or
                 ((phase.name == 'APPLIED') and ocRes.success)
@@ -113,7 +113,8 @@ def VMcreate(
                     if curUID: ownVMs.append((oc, vmName, curUID))
                 else:
                     raise RuntimeError(
-                        f'Could not establish ownership of VM `{vmName}` after '
+                        'Could not establish ownership of VM '
+                        f'`{vmName}` after '
                         f'apply: {lookupErr}'
                     )
             if ocRes.success:

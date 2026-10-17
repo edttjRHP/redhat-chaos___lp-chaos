@@ -37,10 +37,12 @@ class YAMLcfg:
     @staticmethod
     def ToDict(data: 'str | Dict[str, Any]') -> Dict[str, Any]:
         '''
-        Parse to a `dict`.
+        Parse YAML/JSON mapping input or return a supplied `dict`.
 
         :param data:    YAML/JSON `str` or `dict` (returned as-is).
-        :return:        Parsed `dict` (empty `dict` if the input is blank).
+        :return:
+            The supplied `dict` or parsed value. Truthy non-mapping values
+            are returned unchanged; blank or other falsy results become `{}`.
         '''
         if isinstance(data, dict): return data
         return (yaml.safe_load(data) or {})

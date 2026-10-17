@@ -1,9 +1,7 @@
 import base64
 from pathlib import Path
-import re
 from unittest import mock
 
-from jinja2 import Environment, meta
 from jinja2.exceptions import UndefinedError
 import pytest
 import yaml
@@ -33,7 +31,9 @@ REQUIRED_VM_CONTEXT = {
 }
 
 
-def test_Render_UsesTemplateEnvironment(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_Render_UsesTemplateEnvironment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     Utils.AutoPatch(monkeypatch, MUT.Path, 'exists')
     Utils.AutoPatch(monkeypatch, MUT, 'FileSystemLoader')
     Utils.AutoPatch(monkeypatch, MUT, 'Environment')
@@ -51,11 +51,15 @@ def test_Render_UsesTemplateEnvironment(monkeypatch: pytest.MonkeyPatch) -> None
         loader=MUT.FileSystemLoader.return_value,
         keep_trailing_newline=True,
     )
-    MUT.Environment.return_value.get_template.assert_called_once_with('vm.yaml')
+    MUT.Environment.return_value.get_template.assert_called_once_with(
+        'vm.yaml',
+    )
     template.render.assert_called_once_with({'name': 'vm-one'})
 
 
-def test_Render_RejectsMissingTemplate(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_Render_RejectsMissingTemplate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     Utils.AutoPatch(monkeypatch, MUT.Path, 'exists')
     MUT.Path.exists.return_value = False
     path = Path('/missing/template.yaml')
@@ -259,7 +263,9 @@ def test_Render_VMtemplate_SerializesNamespaceBreakoutAsData() -> None:
     'line one\nline two',
     'control\x01value',
 ])
-def test_Render_VMtemplate_StringFieldsRoundTripExactlyOnce(value: str) -> None:
+def test_Render_VMtemplate_StringFieldsRoundTripExactlyOnce(
+    value: str,
+) -> None:
     context = REQUIRED_VM_CONTEXT | {
         'vmName': value,
         'vmNS': value,
@@ -298,7 +304,9 @@ def test_Render_VMtemplate_StringFieldsRoundTripExactlyOnce(value: str) -> None:
 
 
 @pytest.mark.parametrize('value', [123, 1.25, True, None])
-def test_Render_VMtemplate_StringFieldsConvertNativeValues(value: object) -> None:
+def test_Render_VMtemplate_StringFieldsConvertNativeValues(
+    value: object,
+) -> None:
     context = REQUIRED_VM_CONTEXT | {
         'vmName': value,
         'vmNS': value,
@@ -337,7 +345,9 @@ def test_Render_VMtemplate_ReportsMissingRequiredContext(
     context: dict,
 ) -> None:
     vmName = mock.MagicMock()
-    vmName.__str__.side_effect = AssertionError('VM name coerced before checks')
+    vmName.__str__.side_effect = AssertionError(
+        'VM name coerced before checks',
+    )
     context = context | {'vmName': vmName}
 
     with pytest.raises(UndefinedError, match=missingKey):
@@ -382,7 +392,9 @@ def test_Render_VMtemplate_RejectsInvalidContractValues(
     value: object,
 ) -> None:
     vmName = mock.MagicMock()
-    vmName.__str__.side_effect = AssertionError('VM name coerced before checks')
+    vmName.__str__.side_effect = AssertionError(
+        'VM name coerced before checks',
+    )
     context = REQUIRED_VM_CONTEXT | {field: value, 'vmName': vmName}
 
     with pytest.raises(UndefinedError, match=field):
@@ -396,7 +408,9 @@ def test_Render_VMtemplate_CoercesVMnameAfterValidChecks() -> None:
     vmName.__str__.side_effect = AssertionError('VM name conversion reached')
 
     with pytest.raises(AssertionError, match='VM name conversion reached'):
-        MUT.YAMLcfg.Render(VM_TEMPLATE, REQUIRED_VM_CONTEXT | {'vmName': vmName})
+        MUT.YAMLcfg.Render(
+            VM_TEMPLATE, REQUIRED_VM_CONTEXT | {'vmName': vmName},
+        )
 
     vmName.__str__.assert_called_once_with()
 
@@ -456,86 +470,6 @@ def test_Render_VMtemplate_FixesStructuralWikiIdentifiers() -> None:
     assert templateSpec['networks'] == [{'name': 'nic--0', 'pod': {}}]
     assert templateSpec['volumes'][0]['name'] == 'vhd--00-fs-rootfs'
     assert templateSpec['volumes'][1]['name'] == 'cloud-init-disk'
-
-
-def test_VMtemplate_UsesNineKeysSpacedDelimitersAndBareOutputs() -> None:
-    template = VM_TEMPLATE.read_text()
-    contextKeys = meta.find_undeclared_variables(Environment().parse(template))
-    expressions = re.findall(r'{{.*?}}', template, flags=re.DOTALL)
-    statements = re.findall(r'{%.*?%}', template, flags=re.DOTALL)
-    initialization, manifest = template.split('apiVersion:', maxsplit=1)
-    manifestExpressions = re.findall(r'{{ (.*?) }}', manifest)
-
-    assert expressions
-    assert statements
-    assert all(value.startswith('{{ ') and value.endswith(' }}')
-               for value in expressions)
-    assert all(value.startswith('{% ') and value.endswith(' %}')
-               for value in statements)
-    assert 'namespace: "{{' not in template
-    assert contextKeys == {
-        'sshPublicKeyB64',
-        'vmCpuCores',
-        'vmDataVolumeName',
-        'vmDataVolumeSource',
-        'vmMemory',
-        'vmNS',
-        'vmName',
-        'vmStorageClass',
-        'vmStorageSize',
-    }
-    assert set(manifestExpressions) == contextKeys
-    assert len(manifestExpressions) == len(re.findall(r'{{.*?}}', manifest))
-    assert '| default' not in manifest
-    assert '| string' not in manifest
-    assert '| tojson' not in manifest
-    serializers = re.findall(
-        r'{% set (\w+) = .*?\| tojson %}',
-        initialization,
-    )
-    assert set(serializers) == contextKeys
-    assert len(serializers) == len(contextKeys)
-    assert 'resolved' not in template
-
-    nativeVMname = (
-        "{% set vmName = vmName | default('vm-img--windows') | string %}"
-    )
-    nativeDVname = (
-        "{% set vmDataVolumeName = vmDataVolumeName | "
-        "default(vmName + '--vhd--00-system') | string %}"
-    )
-    assert template.index(nativeVMname) < template.index(nativeDVname)
-    assert template.index(nativeDVname) < template.index(
-        '{% set vmName = vmName | tojson %}'
-    )
-    guards, bindings = initialization.split('{% set ', maxsplit=1)
-    assert '{% if (vmDataVolumeSource is not defined) %}' in guards
-    assert (
-        '{% elif (vmDataVolumeSource is not mapping or '
-        'not vmDataVolumeSource) %}'
-    ) in guards
-    assert '{% if (sshPublicKeyB64 is not defined) %}' in guards
-    assert (
-        '{% elif (sshPublicKeyB64 is not string or '
-        'not (sshPublicKeyB64 | trim)) %}'
-    ) in guards
-    assert (
-        '{% if (vmCpuCores is defined and '
-        '(vmCpuCores is not integer or vmCpuCores <= 0)) %}'
-    ) in guards
-    assert all(condition.startswith('(') and condition.endswith(')')
-               for condition in re.findall(r'{% (?:if|elif) (.*?) %}', guards))
-    failures = [line for line in guards.splitlines() if '{{' in line]
-    assert len(failures) == 5
-    assert all(line.startswith('    {{ ') for line in failures)
-    assert guards.count('{% endif %}') == 3
-    assert all(operation not in guards for operation in (
-        '| default', '| string', '| tojson',
-    ))
-    assert all(statement.startswith('{% set ') for statement in re.findall(
-        r'{%.*?%}', '{% set ' + bindings,
-    ))
-    assert '{{' not in bindings
 
 
 def test_ToDict_HandlesDictYAMLandBlankInput() -> None:

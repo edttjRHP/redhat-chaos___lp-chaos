@@ -20,7 +20,9 @@ def CommandExecutor(result: CmdRes) -> mock.MagicMock:
 
 
 def test__DiscoverOptions_ParsesShortLongAndStdErr() -> None:
-    executor = CommandExecutor(CmdRes(optionsText, '      --token string\n', 0, True))
+    executor = CommandExecutor(
+        CmdRes(optionsText, '      --token string\n', 0, True),
+    )
 
     cli = MUT.GoCobraCLI('oc', cmdExec=executor, namespace='default')
 
@@ -46,7 +48,9 @@ def test__DiscoverOptions_FailureLeavesMapsEmpty(
     assert 'Failed to discover' in caplog.text
 
 
-def test_Init_DefaultExecutorIsCreated(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_Init_DefaultExecutorIsCreated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     Utils.AutoPatch(monkeypatch, MUT, 'CmdExec')
     MUT.CmdExec.return_value.Run.return_value = CmdRes('', '', 1, False)
 

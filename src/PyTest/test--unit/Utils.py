@@ -20,6 +20,17 @@ class VMcontext(NamedTuple):
     virtCtl: mock.MagicMock
 
 
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 10.0
+
+    def Now(self) -> float:
+        return self.now
+
+    def Sleep(self, duration: float) -> None:
+        self.now += duration
+
+
 def AutoPatch(
     monkeypatch: pytest.MonkeyPatch,
     target: Any,

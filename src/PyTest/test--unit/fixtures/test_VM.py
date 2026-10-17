@@ -141,11 +141,16 @@ def test_VMcreate_BatchReturnsNewVMsAndAppendsConfirmedOwnership(
         'unit-0',
         'unit-1',
     ]
-    assert all(item.kwargs['ns'] == 'default' for item in MUT.VM.call_args_list)
-    assert all(item.kwargs['sshUsr'] == 'unit-user' for item in MUT.VM.call_args_list)
     assert all(
-        item.kwargs['sshKey'] == '~/.ssh/openshift-qe.pem'
-        for item in MUT.VM.call_args_list
+        (item.kwargs['ns'] == 'default') for item in MUT.VM.call_args_list
+    )
+    assert all(
+        (item.kwargs['sshUsr'] == 'unit-user')
+            for item in MUT.VM.call_args_list
+    )
+    assert all(
+        (item.kwargs['sshKey'] == '~/.ssh/openshift-qe.pem')
+            for item in MUT.VM.call_args_list
     )
 
 
@@ -357,9 +362,11 @@ def test_VMcreate_NestedOverridesDoNotMutateDefaults(
         mock.call(ns='default'),
     ]
     assert MUT.VM.call_args_list[0].kwargs['sshUsr'] == 'custom-user'
-    assert MUT.VM.call_args_list[0].kwargs['sshKey'] == '~/.ssh/openshift-qe.pem'
+    assert MUT.VM.call_args_list[0].kwargs['sshKey'] == \
+        '~/.ssh/openshift-qe.pem'
     assert MUT.VM.call_args_list[1].kwargs['sshUsr'] == 'qa-usr'
-    assert MUT.VM.call_args_list[1].kwargs['sshKey'] == '~/.ssh/openshift-qe.pem'
+    assert MUT.VM.call_args_list[1].kwargs['sshKey'] == \
+        '~/.ssh/openshift-qe.pem'
 
 
 def test_FxtVM_InitialNegativeFailsBeforeYieldWithoutCleanup(

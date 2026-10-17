@@ -36,13 +36,16 @@ class BenchmarkRunnerModules:
         temporaryModule = types.ModuleType(
             'benchmark_runner.main.temporary_environment_variables',
         )
-        temporaryModule.TemporaryEnvironmentVariables = self.temporaryEnvironment
+        temporaryModule.TemporaryEnvironmentVariables = (
+            self.temporaryEnvironment
+        )
         self.modules = {
             'benchmark_runner': package,
             'benchmark_runner.main': mainPackage,
             'benchmark_runner.main.environment_variables': environmentModule,
             'benchmark_runner.main.main': mainModule,
-            'benchmark_runner.main.temporary_environment_variables': temporaryModule,
+            'benchmark_runner.main.temporary_environment_variables':
+                temporaryModule,
         }
 
 
@@ -50,7 +53,7 @@ def PatchModules(
     monkeypatch: pytest.MonkeyPatch,
     runner: BenchmarkRunnerModules,
 ) -> None:
-    for name, module in runner.modules.items():
+    for (name, module) in runner.modules.items():
         monkeypatch.setitem(sys.modules, name, module)
 
 
@@ -237,8 +240,8 @@ def test_VMcreateByBR_ScalePathNamesVMsAndUsesFallbackKey(
         'windows-scale-vm-deadbeef-1',
     ]
     assert all(
-        item.kwargs['sshKey'] == '~/.ssh/openshift-qe.pem'
-        for item in MUT.VM.call_args_list
+        (item.kwargs['sshKey'] == '~/.ssh/openshift-qe.pem')
+            for item in MUT.VM.call_args_list
     )
 
 
@@ -393,7 +396,9 @@ def test_VMcreateByBR_RunnerFailurePreservesPrimaryErrorDuringReconciliation(
     temporaryEnvironment = runner.temporaryEnvironment.return_value
     temporaryEnvironment.__enter__.assert_called_once_with()
     temporaryEnvironment.__exit__.assert_called_once()
-    excType, excValue, excTraceback = temporaryEnvironment.__exit__.call_args.args
+    (excType, excValue, excTraceback) = (
+        temporaryEnvironment.__exit__.call_args.args
+    )
     assert excType is ValueError
     assert excValue is primary
     assert excTraceback is not None
@@ -749,7 +754,7 @@ def test_FxtVMbyBR_LaterPartialFailureCleansAggregateOnClose(
     MUT.VM.CleanUpVMs.assert_not_called()
     generator.close()
     MUT.VM.CleanUpVMs.assert_called_once()
-    cleanupVMs, cleanupOwnership = MUT.VM.CleanUpVMs.call_args.args
+    (cleanupVMs, cleanupOwnership) = MUT.VM.CleanUpVMs.call_args.args
     assert cleanupVMs is bundle.vmList
     assert cleanupVMs == [vmZero]
     assert cleanupOwnership == [

@@ -1,9 +1,14 @@
 import logging
 import time
+from typing import TYPE_CHECKING
 
 import pytest
 
 from libs.CustomTypes import NamedDict
+
+
+if TYPE_CHECKING:
+    from fixtures.KrknLib import KrknContext
 
 
 logs = logging.getLogger()
@@ -24,7 +29,9 @@ class TestChaos():
         },)],
         indirect=True,
     )
-    def test_VMsurvivesVirtLauncherKill(self, krknChaos):
+    def test_VMsurvivesVirtLauncherKill(
+        self, krknChaos: 'KrknContext',
+    ) -> None:
         '''
         Chaos: kill the VM's `virt-launcher` Pod and assert KubeVirt recovers
         it.
@@ -101,7 +108,9 @@ class TestChaos():
         },)],
         indirect=True,
     )
-    def test_HostSideKernelScanOnVMnode(self, krknChaos):
+    def test_HostSideKernelScanOnVMnode(
+        self, krknChaos: 'KrknContext',
+    ) -> None:
         '''
         Host-side reach: run a command on the worker Node that runs the VM.
 

@@ -1,9 +1,14 @@
 import logging
 import time
+from typing import TYPE_CHECKING
 
 import pytest
 
 from libs.CustomTypes import NamedDict
+
+
+if TYPE_CHECKING:
+    from fixtures.Krkn import FxtObjKrkn
 
 
 logs = logging.getLogger()
@@ -14,17 +19,19 @@ class TestChaos():
 
     @pytest.mark.krkn
     @pytest.mark.parametrize(
-        'krknChaos,',
+        'fxtKrkn,',
         [({
             'ns': 'bsod-test',
-            'testPars': {
-                'vmName': 'bsod-win2022',
-                'recoveryTO': 300,
-            },
+            'testPars': NamedDict(
+                vmName='bsod-win2022',
+                recoveryTO=300,
+            ),
         },)],
         indirect=True,
     )
-    def test_VMsurvivesVirtLauncherKill(self, krknChaos):
+    def test_VMsurvivesVirtLauncherKill(
+        self, fxtKrkn: 'FxtObjKrkn',
+    ) -> None:
         '''
         Chaos: kill the VM's `virt-launcher` Pod and assert KubeVirt recovers
         it.
@@ -33,10 +40,10 @@ class TestChaos():
         Pod failure. With `runStrategy: Always` KubeVirt must reschedule a new
         launcher pod and bring the VMI back to `Running`.
         '''
-        client = krknChaos.krknClient
-        oc = krknChaos.cli.oc
-        ns = krknChaos.ns
-        (vmName, recoveryTO) = krknChaos.testPars.values()
+        client = fxtKrkn.krknClient
+        oc = fxtKrkn.cli.oc
+        ns = fxtKrkn.ns
+        (vmName, recoveryTO) = fxtKrkn.testPars.values()
         labelSel = f'vm.kubevirt.io/name={vmName}'
 
         #1. Find the live `virt-launcher` Pod managing the VM.
@@ -92,16 +99,18 @@ class TestChaos():
 
     @pytest.mark.krkn
     @pytest.mark.parametrize(
-        'krknChaos,',
+        'fxtKrkn,',
         [({
             'ns': 'bsod-test',
-            'testPars': {
-                'vmName': 'bsod-win2022',
-            },
+            'testPars': NamedDict(
+                vmName='bsod-win2022',
+            ),
         },)],
         indirect=True,
     )
-    def test_HostSideKernelScanOnVMnode(self, krknChaos):
+    def test_HostSideKernelScanOnVMnode(
+        self, fxtKrkn: 'FxtObjKrkn',
+    ) -> None:
         '''
         Host-side reach: run a command on the worker Node that runs the VM.
 
@@ -120,10 +129,10 @@ class TestChaos():
          4. As evidence, scan `dmesg` for split-lock/#AC/hypervisor lines and
             log them (not asserted: a clean host is healthy).
         '''
-        client = krknChaos.krknClient
-        oc = krknChaos.cli.oc
-        ns = krknChaos.ns
-        (vmName,) = krknChaos.testPars.values()
+        client = fxtKrkn.krknClient
+        oc = fxtKrkn.cli.oc
+        ns = fxtKrkn.ns
+        (vmName,) = fxtKrkn.testPars.values()
 
         #1. Which node does the VM run on? (KubeVirt VMI -> node name.)
         nodeRes = oc.Run(
@@ -143,7 +152,7 @@ class TestChaos():
         )
 
         # 3. Host-side command: prove we can execute on the node.
-        kernel = krknChaos.ExecOnNode(
+        kernel = fxtKrkn.ExecOnNode(
             node, 'krkn-hostscan', 'uname -r',
             ns=ns,
         )
@@ -154,7 +163,7 @@ class TestChaos():
         )
 
         # 4. Scan the host kernel log for BSOD-relevant signatures.
-        scan = krknChaos.ExecOnNode(
+        scan = fxtKrkn.ExecOnNode(
             node,
             'krkn-hostscan',
             (

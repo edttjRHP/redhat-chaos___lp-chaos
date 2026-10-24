@@ -42,14 +42,22 @@ _DEF__FXT_CFG = NamedDict(
 
 
 @dataclasses.dataclass(frozen=True)
+class FuncParsVMcreateByBR:
+    fxtCfgObj: NamedDict
+    vmList: list[VM] = dataclasses.field(default_factory=list)
+    ownVMs: list[tuple[Any, str, str]] = dataclasses.field(
+        default_factory=list,
+    )
+
+
+@dataclasses.dataclass(frozen=True)
 class FxtObjVMbyBR(FxtObjVM):
     '''Benchmark-runner VM fixture object.'''
 
 
 def VMcreateByBR(
     request: Any,
-    vmList: list[VM],
-    ownVMs: list[tuple[Any, str, str]],
+    fPars: FuncParsVMcreateByBR,
     *,
     ocCLI: Callable[..., Any],
     virtCtlCLI: Callable[..., Any],
@@ -59,20 +67,25 @@ def VMcreateByBR(
     Provision VMs via benchmark-runner and return `VM` wrapper objects.
 
     Calls `benchmark_runner.main.main.main()` with the required environment
-    variables. VMs are running when returned.
+    variables and reconciles created VM UIDs.
 
     :param request:
         Pytest `request` built-in fixture.
         See `FxtVMbyBR()` for fixture parametrization details.
-    :param vmList:
-        Shared list to which created `VM` wrappers are appended.
-    :param ownVMs:      Shared ownership records used during fixture cleanup.
+    :param fPars:
+        Persistent function parameters.
+          - fxtCfgObj:
+                Base fixture configuration. See `FxtVMbyBR` for details.
+          - vmList:
+                Shared list to which created `VM` wrappers are appended.
+          - ownVMs:     Shared ownership records used during fixture cleanup.
     :param ocCLI:       Factory for the `OCcli` used by each VM.
     :param virtCtlCLI:  Factory for the `VirtCtlCLI` used by each VM.
-    :param fxtCfgArgs:  Fixture configuration. See `FxtVMbyBR` for details.
-    :return:            A list of `VM` instances created by this call.
+    :param fxtCfgArgs:  Fixture conf. overrides. See `FxtVMbyBR` for details.
+    :return:
+        A list of `VM` instances created by this call.
     '''
-    fxtCfg = _DEF__FXT_CFG | NamedDict(fxtCfgArgs)
+    fxtCfg = fPars.fxtCfgObj | NamedDict(fxtCfgArgs)
 
     vmCount = fxtCfg.count
     if (vmCount < 0): raise ValueError('VM count must not be negative.')
@@ -146,7 +159,7 @@ def VMcreateByBR(
                     if not curUID:
                         missingVMs.append(vmName)
                         continue
-                    ownVMs.append((oc, vmName, curUID))
+                    fPars.ownVMs.append((oc, vmName, curUID))
                 except Exception as ex:
                     lookupFail.append(f'VM `{vmName}`: {ex}')
 
@@ -193,7 +206,7 @@ def VMcreateByBR(
                 sshUsr=fxtCfg.gstCfg.usrCrd.sshUsr,
                 sshKey=sshKey,
             ))
-            vmList.append(newVMs[-1])
+            fPars.vmList.append(newVMs[-1])
 
     return newVMs
 
@@ -245,19 +258,23 @@ def FxtVMbyBR(
                         Calling `fxtVMbyBR.vmCreate()` adds wrappers to this
                         list.
     '''
+    fxtCfg = _DEF__FXT_CFG | NamedDict(**getattr(request, 'param', {}))
     vmList: list[VM] = []
     ownVMs: list[tuple[Any, str, str]] = []
-    vmCreate = functools.partial(
-        VMcreateByBR,
-        request,
-        vmList,
-        ownVMs,
-        ocCLI=fxtOCcli,
-        virtCtlCLI=fxtVirtCtlCLI,
-    )
 
     try:
-        vmCreate(**getattr(request, 'param', {}))
+        vmCreate = functools.partial(
+            VMcreateByBR,
+            request,
+            FuncParsVMcreateByBR(
+                fxtCfgObj=fxtCfg,
+                vmList=vmList,
+                ownVMs=ownVMs,
+            ),
+            ocCLI=fxtOCcli,
+            virtCtlCLI=fxtVirtCtlCLI,
+        )
+        vmCreate()
         yield FxtObjVMbyBR(vmCreate=vmCreate, vmList=vmList)
     finally:
         if vmList or ownVMs:

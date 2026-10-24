@@ -36,13 +36,16 @@ class BenchmarkRunnerModules:
         temporaryModule = types.ModuleType(
             'benchmark_runner.main.temporary_environment_variables',
         )
-        temporaryModule.TemporaryEnvironmentVariables = self.temporaryEnvironment
+        temporaryModule.TemporaryEnvironmentVariables = (
+            self.temporaryEnvironment
+        )
         self.modules = {
             'benchmark_runner': package,
             'benchmark_runner.main': mainPackage,
             'benchmark_runner.main.environment_variables': environmentModule,
             'benchmark_runner.main.main': mainModule,
-            'benchmark_runner.main.temporary_environment_variables': temporaryModule,
+            'benchmark_runner.main.temporary_environment_variables':
+                temporaryModule,
         }
 
 
@@ -50,8 +53,141 @@ def PatchModules(
     monkeypatch: pytest.MonkeyPatch,
     runner: BenchmarkRunnerModules,
 ) -> None:
-    for name, module in runner.modules.items():
+    for (name, module) in runner.modules.items():
         monkeypatch.setitem(sys.modules, name, module)
+
+
+def test_FuncParsVMcreateByBR_RequiresConfigAndKeepsMutableLists() -> None:
+    with pytest.raises(TypeError, match='fxtCfgObj'):
+        MUT.FuncParsVMcreateByBR()
+
+    config = MUT._DEF__FXT_CFG | NamedDict(count=0)
+    first = MUT.FuncParsVMcreateByBR(fxtCfgObj=config)
+    second = MUT.FuncParsVMcreateByBR(fxtCfgObj=config)
+    assert (first.fxtCfgObj is config)
+    assert (first.vmList is not second.vmList)
+    assert (first.ownVMs is not second.ownVMs)
+    assert (first.vmList is not first.ownVMs)
+    for fld in ('fxtCfgObj', 'vmList', 'ownVMs'):
+        with pytest.raises(FrozenInstanceError):
+            setattr(first, fld, None)
+
+    vm = object()
+    ownership = (object(), 'vm-name', 'uid')
+    first.vmList.append(vm)
+    first.ownVMs.append(ownership)
+    assert (first.vmList == [vm])
+    assert (first.ownVMs == [ownership])
+    assert (second.vmList == [])
+    assert (second.ownVMs == [])
+
+
+def test_FxtVMbyBR_RetainsSetupAndIsolatesTemporaryOverrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    Utils.AutoPatch(monkeypatch, MUT, 'VM')
+    Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
+    Utils.AutoPatch(monkeypatch, MUT.Path, 'is_file')
+    MUT.Path.is_file.return_value = False
+    MUT.uuid4.side_effect = ['first-rest', 'second-rest', 'third-rest']
+    MUT.VM.GetVMuid.side_effect = [
+        (True, '', ''), (True, 'uid-one', ''),
+        (True, '', ''), (True, 'uid-two', ''),
+        (True, '', ''), (True, 'uid-three', ''),
+    ]
+    runner = BenchmarkRunnerModules({'run_artifacts_path': '/tmp'})
+    PatchModules(monkeypatch, runner)
+    setup = {
+        'count': 0, 'ns': 'setup-ns', 'workloadName': 'setup',
+        'cliCfg': NamedDict(
+            ocCfg={'context': 'setup-context'},
+            vcCfg={'kubeconfig': '/setup-config'},
+        ),
+        'gstCfg': NamedDict(usrCrd=NamedDict(sshUsr='setup-user')),
+    }
+    overrides = {
+        'count': 1, 'ns': 'call-ns',
+        'cliCfg': NamedDict(ocCfg={'context': 'call-context'}),
+        'gstCfg': NamedDict(usrCrd=NamedDict(sshUsr='call-user')),
+    }
+    (setupBefore, overridesBefore, defaultsBefore) = json.loads(json.dumps((
+        setup, overrides, MUT._DEF__FXT_CFG,
+    )))
+    ocFactory = mock.MagicMock()
+    virtCtlFactory = mock.MagicMock()
+    request = SimpleNamespace(param=setup)
+    generator = MUT.FxtVMbyBR.__wrapped__(
+        request, ocFactory, virtCtlFactory,
+    )
+    bundle = next(generator)
+    fPars = bundle.vmCreate.args[1]
+    configBefore = json.loads(json.dumps(fPars.fxtCfgObj))
+    assert (bundle.vmList is fPars.vmList)
+    assert (bundle.vmCreate() == [])
+    request.param = {'count': -1, 'ns': 'ignored-later-request'}
+
+    first = bundle.vmCreate(**overrides)
+    assert (bundle.vmCreate() == [])
+    second = bundle.vmCreate(count=1)
+    third = bundle.vmCreate(count=1)
+
+    assert (bundle.vmList == first + second + third)
+    assert (ocFactory.call_args_list == [
+        mock.call(ns='call-ns', context='call-context'),
+        mock.call(ns='setup-ns', context='setup-context'),
+        mock.call(ns='setup-ns', context='setup-context'),
+    ])
+    assert (virtCtlFactory.call_args_list == [
+        mock.call(ns='call-ns', kubeconfig='/setup-config'),
+        mock.call(ns='setup-ns', kubeconfig='/setup-config'),
+        mock.call(ns='setup-ns', kubeconfig='/setup-config'),
+    ])
+    assert ([call.kwargs['sshUsr'] for call in MUT.VM.call_args_list] == [
+        'call-user', 'setup-user', 'setup-user',
+    ])
+    assert ([call.kwargs['name'] for call in MUT.VM.call_args_list] == [
+        'setup-vm-first', 'setup-vm-second', 'setup-vm-third',
+    ])
+    assert (fPars.fxtCfgObj == configBefore)
+    assert (setup == setupBefore)
+    assert (overrides == overridesBefore)
+    assert (MUT._DEF__FXT_CFG == defaultsBefore)
+    generator.close()
+    (cleanupVMs, cleanupOwnership) = MUT.VM.CleanUpVMs.call_args.args
+    assert (cleanupVMs is bundle.vmList)
+    assert (cleanupOwnership is fPars.ownVMs)
+    assert ([record[2] for record in cleanupOwnership] == [
+        'uid-one', 'uid-two', 'uid-three',
+    ])
+
+
+@pytest.mark.parametrize('hasRequestParam', [False, True])
+def test_FxtVMbyBR_DefaultSetupIsRetainedAcrossCalls(
+    monkeypatch: pytest.MonkeyPatch,
+    hasRequestParam: bool,
+) -> None:
+    Utils.AutoPatch(monkeypatch, MUT, 'VM')
+    Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
+    Utils.AutoPatch(monkeypatch, MUT.Path, 'is_file')
+    MUT.Path.is_file.return_value = False
+    MUT.uuid4.side_effect = ['initial-rest', 'later-rest']
+    MUT.VM.GetVMuid.side_effect = [
+        (True, '', ''), (True, 'initial-uid', ''),
+        (True, '', ''), (True, 'later-uid', ''),
+    ]
+    runner = BenchmarkRunnerModules({'run_artifacts_path': '/tmp'})
+    PatchModules(monkeypatch, runner)
+    request = (
+        SimpleNamespace(param={}) if hasRequestParam else SimpleNamespace()
+    )
+    generator = MUT.FxtVMbyBR.__wrapped__(
+        request, mock.MagicMock(), mock.MagicMock(),
+    )
+    bundle = next(generator)
+    assert (len(bundle.vmCreate()) == 1)
+    assert (len(bundle.vmList) == 2)
+    assert (runner.brMain.call_count == 2)
+    generator.close()
 
 
 def test_VMcreateByBR_NegativeCountIsRejectedBeforeImportingRunner(
@@ -68,8 +204,10 @@ def test_VMcreateByBR_NegativeCountIsRejectedBeforeImportingRunner(
     with pytest.raises(ValueError, match='must not be negative'):
         MUT.VMcreateByBR(
             SimpleNamespace(),
-            vmList,
-            ownVMs,
+            MUT.FuncParsVMcreateByBR(
+                fxtCfgObj=MUT._DEF__FXT_CFG,
+                vmList=vmList, ownVMs=ownVMs,
+            ),
             ocCLI=ocFactory,
             virtCtlCLI=virtCtlFactory,
             count=-1,
@@ -99,8 +237,10 @@ def test_VMcreateByBR_ZeroCountReturnsEmptyWithoutRunner(
 
     result = MUT.VMcreateByBR(
         SimpleNamespace(),
-        vmList,
-        ownVMs,
+        MUT.FuncParsVMcreateByBR(
+            fxtCfgObj=MUT._DEF__FXT_CFG,
+            vmList=vmList, ownVMs=ownVMs,
+        ),
         ocCLI=ocFactory,
         virtCtlCLI=virtCtlFactory,
         count=0,
@@ -134,14 +274,15 @@ def test_VMcreateByBR_SingleVMhappyPathUsesGeneratedIdentityKey(
     PatchModules(monkeypatch, runner)
     ocFactory = mock.MagicMock(name='ocFactory')
     virtCtlFactory = mock.MagicMock(name='virtCtlFactory')
-    request = SimpleNamespace()
     vmList = []
     ownVMs = []
 
     created = MUT.VMcreateByBR(
-        request,
-        vmList,
-        ownVMs,
+        SimpleNamespace(),
+        MUT.FuncParsVMcreateByBR(
+            fxtCfgObj=MUT._DEF__FXT_CFG,
+            vmList=vmList, ownVMs=ownVMs,
+        ),
         ocCLI=ocFactory,
         virtCtlCLI=virtCtlFactory,
         workloadName='windows',
@@ -212,8 +353,10 @@ def test_VMcreateByBR_ScalePathNamesVMsAndUsesFallbackKey(
 
     created = MUT.VMcreateByBR(
         SimpleNamespace(),
-        vmList,
-        ownVMs,
+        MUT.FuncParsVMcreateByBR(
+            fxtCfgObj=MUT._DEF__FXT_CFG,
+            vmList=vmList, ownVMs=ownVMs,
+        ),
         ocCLI=ocFactory,
         virtCtlCLI=virtCtlFactory,
         count=2,
@@ -237,8 +380,8 @@ def test_VMcreateByBR_ScalePathNamesVMsAndUsesFallbackKey(
         'windows-scale-vm-deadbeef-1',
     ]
     assert all(
-        item.kwargs['sshKey'] == '~/.ssh/openshift-qe.pem'
-        for item in MUT.VM.call_args_list
+        (item.kwargs['sshKey'] == '~/.ssh/openshift-qe.pem')
+            for item in MUT.VM.call_args_list
     )
 
 
@@ -269,8 +412,10 @@ def test_VMcreateByBR_NestedOverridesDoNotMutateDefaults(
 
     MUT.VMcreateByBR(
         SimpleNamespace(),
-        [],
-        [],
+        MUT.FuncParsVMcreateByBR(
+            fxtCfgObj=MUT._DEF__FXT_CFG,
+            vmList=[], ownVMs=[],
+        ),
         ocCLI=ocFactory,
         virtCtlCLI=virtCtlFactory,
         cliCfg=NamedDict(
@@ -281,8 +426,10 @@ def test_VMcreateByBR_NestedOverridesDoNotMutateDefaults(
     )
     MUT.VMcreateByBR(
         SimpleNamespace(),
-        [],
-        [],
+        MUT.FuncParsVMcreateByBR(
+            fxtCfgObj=MUT._DEF__FXT_CFG,
+            vmList=[], ownVMs=[],
+        ),
         ocCLI=ocFactory,
         virtCtlCLI=virtCtlFactory,
     )
@@ -328,8 +475,10 @@ def test_VMcreateByBR_PreflightLookupFailureRaisesWithoutTracking(
     with pytest.raises(RuntimeError, match='lookup error'):
         MUT.VMcreateByBR(
             SimpleNamespace(),
-            vmList,
-            ownVMs,
+            MUT.FuncParsVMcreateByBR(
+                fxtCfgObj=MUT._DEF__FXT_CFG,
+                vmList=vmList, ownVMs=ownVMs,
+            ),
             ocCLI=mock.MagicMock(),
             virtCtlCLI=mock.MagicMock(),
         )
@@ -351,8 +500,10 @@ def test_VMcreateByBR_PreflightExistingVMIsRefused(
     with pytest.raises(RuntimeError, match='already exists'):
         MUT.VMcreateByBR(
             SimpleNamespace(),
-            [],
-            [],
+            MUT.FuncParsVMcreateByBR(
+                fxtCfgObj=MUT._DEF__FXT_CFG,
+                vmList=[], ownVMs=[],
+            ),
             ocCLI=mock.MagicMock(),
             virtCtlCLI=mock.MagicMock(),
         )
@@ -381,8 +532,10 @@ def test_VMcreateByBR_RunnerFailurePreservesPrimaryErrorDuringReconciliation(
     with caplog.at_level('ERROR'), pytest.raises(ValueError) as raised:
         MUT.VMcreateByBR(
             SimpleNamespace(),
-            [],
-            [],
+            MUT.FuncParsVMcreateByBR(
+                fxtCfgObj=MUT._DEF__FXT_CFG,
+                vmList=[], ownVMs=[],
+            ),
             ocCLI=mock.MagicMock(),
             virtCtlCLI=mock.MagicMock(),
             count=3,
@@ -393,7 +546,9 @@ def test_VMcreateByBR_RunnerFailurePreservesPrimaryErrorDuringReconciliation(
     temporaryEnvironment = runner.temporaryEnvironment.return_value
     temporaryEnvironment.__enter__.assert_called_once_with()
     temporaryEnvironment.__exit__.assert_called_once()
-    excType, excValue, excTraceback = temporaryEnvironment.__exit__.call_args.args
+    (excType, excValue, excTraceback) = (
+        temporaryEnvironment.__exit__.call_args.args
+    )
     assert excType is ValueError
     assert excValue is primary
     assert excTraceback is not None
@@ -417,8 +572,10 @@ def test_VMcreateByBR_ReconciliationLookupFailureRaisesWithoutRunnerError(
     with pytest.raises(RuntimeError, match='reconcile'):
         MUT.VMcreateByBR(
             SimpleNamespace(),
-            [],
-            [],
+            MUT.FuncParsVMcreateByBR(
+                fxtCfgObj=MUT._DEF__FXT_CFG,
+                vmList=[], ownVMs=[],
+            ),
             ocCLI=mock.MagicMock(),
             virtCtlCLI=mock.MagicMock(),
         )
@@ -437,8 +594,10 @@ def test_VMcreateByBR_ReconciliationMissingVMRaisesWithoutRunnerError(
     with pytest.raises(RuntimeError, match='did not create expected'):
         MUT.VMcreateByBR(
             SimpleNamespace(),
-            [],
-            [],
+            MUT.FuncParsVMcreateByBR(
+                fxtCfgObj=MUT._DEF__FXT_CFG,
+                vmList=[], ownVMs=[],
+            ),
             ocCLI=mock.MagicMock(),
             virtCtlCLI=mock.MagicMock(),
         )
@@ -644,7 +803,7 @@ def test_FxtVMbyBR_VMcreateAllowsCLIOverrides(
     generator.close()
 
 
-@pytest.mark.parametrize('argument', ['request', 'vmList', 'ownVMs'])
+@pytest.mark.parametrize('argument', ['request', 'fPars'])
 def test_FxtVMbyBR_VMcreateRejectsInternalKeywordReplacementBeforeOperations(
     monkeypatch: pytest.MonkeyPatch,
     argument: str,
@@ -658,14 +817,14 @@ def test_FxtVMbyBR_VMcreateRejectsInternalKeywordReplacementBeforeOperations(
         virtCtlFactory,
     )
     bundle = next(generator)
-    sharedVMs = bundle.vmCreate.args[1]
-    sharedOwnership = bundle.vmCreate.args[2]
+    sharedVMs = bundle.vmCreate.args[1].vmList
+    sharedOwnership = bundle.vmCreate.args[1].ownVMs
 
     with pytest.raises(TypeError, match='multiple values'):
         bundle.vmCreate(**{argument: object()})
 
-    assert bundle.vmCreate.args[1] is sharedVMs
-    assert bundle.vmCreate.args[2] is sharedOwnership
+    assert (bundle.vmCreate.args[1].vmList is sharedVMs)
+    assert (bundle.vmCreate.args[1].ownVMs is sharedOwnership)
     assert bundle.vmList is sharedVMs
     assert bundle.vmList == []
     assert sharedOwnership == []
@@ -749,7 +908,7 @@ def test_FxtVMbyBR_LaterPartialFailureCleansAggregateOnClose(
     MUT.VM.CleanUpVMs.assert_not_called()
     generator.close()
     MUT.VM.CleanUpVMs.assert_called_once()
-    cleanupVMs, cleanupOwnership = MUT.VM.CleanUpVMs.call_args.args
+    (cleanupVMs, cleanupOwnership) = MUT.VM.CleanUpVMs.call_args.args
     assert cleanupVMs is bundle.vmList
     assert cleanupVMs == [vmZero]
     assert cleanupOwnership == [

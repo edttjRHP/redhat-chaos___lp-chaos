@@ -20,7 +20,9 @@ def CommandExecutor(result: CmdRes) -> mock.MagicMock:
 
 
 def test__DiscoverOptions_ParsesShortLongAndStdErr() -> None:
-    executor = CommandExecutor(CmdRes(optionsText, '      --token string\n', 0, True))
+    executor = CommandExecutor(
+        CmdRes(optionsText, '      --token string\n', 0, True),
+    )
 
     cli = MUT.GoCobraCLI('oc', cmdExec=executor, namespace='default')
 
@@ -46,7 +48,9 @@ def test__DiscoverOptions_FailureLeavesMapsEmpty(
     assert 'Failed to discover' in caplog.text
 
 
-def test_Init_DefaultExecutorIsCreated(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_Init_DefaultExecutorIsCreated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     Utils.AutoPatch(monkeypatch, MUT, 'CmdExec')
     MUT.CmdExec.return_value.Run.return_value = CmdRes('', '', 1, False)
 
@@ -117,6 +121,7 @@ def test_Run_BuildsCobraCommandAndOverridesDefaults() -> None:
         ],
         input='stdin',
         spPars={'timeout': 2},
+        isSecret=False,
     )
 
 
@@ -139,3 +144,24 @@ def test_Run_RejectsInvalidOption() -> None:
 
     with pytest.raises(TypeError, match="Option 'bad'"):
         cli.Run('do', bad=[])
+
+
+@pytest.mark.parametrize('isSecret', [False, True])
+def test_Run_SecretFlagIsExecutorMetadataNotCLIOption(
+    isSecret: bool,
+) -> None:
+    executor = CommandExecutor(CmdRes(optionsText, '', 0, True))
+    cli = MUT.GoCobraCLI('oc', cmdExec=executor, namespace='selected')
+    executor.Run.reset_mock()
+    expected = CmdRes('raw-output', 'raw-error', 9, False)
+    executor.Run.return_value = expected
+    result = cli.Run(
+        'create', 'secret', input='synthetic-payload',
+        spPars={'timeout': 4}, isSecret=isSecret,
+    )
+    assert result is expected
+    executor.Run.assert_called_once_with(
+        ['oc', '--namespace', 'selected', 'create', 'secret'],
+        input='synthetic-payload', spPars={'timeout': 4},
+        isSecret=isSecret,
+    )

@@ -7,6 +7,7 @@ import pytest
 
 from libs.OpenShift.LP.Virt.VM.RHOVssh import RHOVsshCon
 from libs.OpenShift.LP.Virt.VM.VM import VM
+from libs.Utils.CmdExec import CmdExec, CmdRes
 
 
 class RHOVconnectionContext(NamedTuple):
@@ -18,6 +19,17 @@ class VMcontext(NamedTuple):
     vm: VM
     oc: mock.MagicMock
     virtCtl: mock.MagicMock
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 10.0
+
+    def Now(self) -> float:
+        return self.now
+
+    def Sleep(self, duration: float) -> None:
+        self.now += duration
 
 
 def AutoPatch(
@@ -32,3 +44,17 @@ def AutoPatch(
     '''
     spec = mock.create_autospec(getattr(target, name))
     monkeypatch.setattr(target, name, spec)
+
+
+class RecordingExec(CmdExec):
+    '''Record only non-secret stdin; preserve execution and raw results.'''
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.inputs: list[str | bytes | None] = []
+
+    def Run(
+        self, command: list[str], isSecret: bool = False, **kwargs: Any,
+    ) -> CmdRes:
+        if (not isSecret): self.inputs.append(kwargs.get('input'))
+        return super().Run(command, isSecret=isSecret, **kwargs)

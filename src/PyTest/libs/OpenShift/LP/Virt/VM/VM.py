@@ -1,7 +1,7 @@
 '''KubeVirt VirtualMachine wrapper with lifecycle and SSH management.'''
 import logging
 import sys
-from typing import Optional
+from typing import Any, Optional
 
 from libs.CustomTypes import NamedDict
 from libs.OpenShift.LP.Virt.CLI.VirtCtl import VirtCtlCLI
@@ -102,7 +102,7 @@ class VM:
                     )
                     continue
 
-                phase, result = oc.DelRes(f'VirtualMachine/{vmName}')
+                (phase, result) = oc.DelRes(f'VirtualMachine/{vmName}')
                 if not result.success:
                     clnFail.append(
                         f'Delete `{vmName}` at `{phase.name}`: {result.stderr}'
@@ -145,8 +145,9 @@ class VM:
         :param sshUsr:
             SSH UserName (default: `'qa-usr'`).
         :param sshKey:
-            Path to the SSH private key. If `None`, depends on the `ssh` client
-            used (for OpenSSH, it defaults to `~/.ssh/id_<xxx>`).
+            Path to the SSH private key. If `None` or empty, `NewSSH` defaults
+            to `~/.ssh/id_ed25519`; its `idFile` keyword argument can override
+            this default.
         '''
         self.name = name
         self.namespace = ns
@@ -186,18 +187,19 @@ class VM:
         if self._Status() in ('Stopped', 'Stopping'): return True
         return self.cli.virtCtl.Run('stop', self.name).success
 
-    def NewSSH(self, probeTO: int = 300, **kwargs) -> RHOVsshCon:
+    def NewSSH(self, probeTO: int = 300, **kwargs: Any) -> RHOVsshCon:
         '''
         Create a new `RHOVsshCon` instance for this VM.
 
-        Probes SSH readiness before returning. Blocks up to `probeTO` seconds
-        waiting for SSH Server in the VM to become reachable.
+        Probes SSH readiness before returning, with a retry timeout and waits
+        capped to its remaining duration.
 
         :param probeTO:
-            SSH probe timeout in seconds (default: `300`).
+            Positive numeric SSH retry timeout in seconds (default: `300`).
         :param kwargs:
             Forwarded to `RHOVsshCon.__init__` (override `user`, `idFile`,
-            `kubeconfig`, etc.).
+            `virtCtl`, etc.). Defaults to this VM's `virtCtl` client; pass
+            `virtCtl=None` to create a client using `ns` and `kubeconfig`.
         :return:
             A new `RHOVsshCon` instance, probed for readiness.
         '''
@@ -206,6 +208,7 @@ class VM:
             'host': self.name,
             'user': self.sshUsr,
             'idFile': self.sshKey or '~/.ssh/id_ed25519',
+            'virtCtl': self.cli.virtCtl,
         }
         conn = RHOVsshCon(**{**defArgs, **kwargs})
         if not conn.Probe(timeout=probeTO):

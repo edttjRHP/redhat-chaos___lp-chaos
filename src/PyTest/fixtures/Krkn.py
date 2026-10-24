@@ -1,12 +1,14 @@
 '''
-KrknLib fixture for Chaos scenarios
+Krkn fixture for Chaos scenarios
 
 https://github.com/krkn-chaos/krkn-lib
 '''
-from functools import partial
+from collections.abc import Callable, Generator
+import dataclasses
+import functools
 import logging
 import os
-from typing import Any, Callable, Generator, NamedTuple
+from typing import Any
 
 import pytest
 
@@ -31,41 +33,30 @@ _DEF__FXT_CFG = NamedDict(
 )
 
 
-class KrknContext(NamedTuple):
+@dataclasses.dataclass(frozen=True)
+class FxtObjKrkn:
     '''
-    Bundle handed to a test: `krkn-lib` client, parameters, and CLI helpers.
+    Fixture Object.
 
-    Attributes:
-      - krknClient:
-        Initialized `KrknOpenshift` client instance.
-      - krknPars:
-        A `NamedDict` containing Krkn parameters.
-      - testPars:
-        A `NamedDict` containing test-specific parameters.
-      - cli:
-        A `NamedDict` containing pre-configured CLI wrappers:
-          - oc: A `OCcli` instance.
-          - virtCtl: A `VirtCtlCLI` instance.
-      - ExecOnNode:
-        Helper function `ExecOnNode(node, podName, command, ...)`, bound to
-        `krknClient`.
+    Can be sub-classed to add fields. Sub-classes must also be decorated with
+    `@dataclass(frozen=True)`.
     '''
     krknClient: Any
     krknPars: NamedDict
     testPars: NamedDict
     cli: NamedDict
     ns: str
-    ExecOnNode: Callable[..., Any]
+    ExecOnNode: Callable[..., str]
 
 
 def ExecOnNode(
-    krknClient,
-    node,
-    podName,
-    command,
-    ns=_DEF__FXT_CFG.ns,
-    ctrImg=_DEF__FXT_CFG.ctrImgURL_ExecNode,
-    timeout=120
+    krknClient: Any,
+    node: str,
+    podName: str,
+    command: str,
+    ns: str = _DEF__FXT_CFG.ns,
+    ctrImg: str = _DEF__FXT_CFG.ctrImgURL_ExecNode,
+    timeout: Any = 120
 ) -> str:
     '''
     Run a shell command on a Node via a transient privileged pod, using
@@ -76,7 +67,8 @@ def ExecOnNode(
         (b) waits 500s before failing, and
         (c) never deletes the pod.
     Here we build the same privileged/hostNetwork/dbus pod but with a pullable
-    image, a short timeout, and guaranteed cleanup.
+    image, a short timeout, and best-effort cleanup in `finally`. Deletion
+    failures are logged and suppressed, so the helper Pod may remain.
 
     :param command:
         The command as a single shell string (e.g. 'uname -r').
@@ -127,23 +119,21 @@ def ExecOnNode(
             logs.warning(f'Could not delete helper Pod {podName!r} in {ns!r}.')
 
 
-@pytest.fixture(name='krknChaos', scope='function')
-def KrnChaos(
+@pytest.fixture(name='fxtKrkn', scope='function')
+def FxtKrkn(
     request: Any,
     fxtOCcli: Callable[..., Any],
     fxtVirtCtlCLI: Callable[..., Any],
-) -> Generator[Any, Any, Any]:
+) -> Generator[FxtObjKrkn, None, None]:
     '''
     Provide a `krkn-lib` client and scenario parameters to a test.
 
     Configure via indirect parametrize with `dict`:
         @pytest.mark.parametrize(
-            'krknChaos,',
+            'fxtKrkn,',
             [({
                 'ns': 'bsod-test',
-                'testPars': {
-                    'vmName': 'bsod-win2025',
-                },
+                'testPars': NamedDict(vmName='bsod-win2025'),
             },)],
             indirect=True,
         )
@@ -168,27 +158,31 @@ def KrnChaos(
             (default: `'registry.access.redhat.com/ubi9/ubi'`).
 
     :return:
-        A `KrknContext` namedtuple containing:
+        A `FxtObjKrkn` where:
           - krknClient: A `KrknOpenshift` instance.
-          - krknPars: A `NamedDict` of Krkn parameters.
-          - testPars: A `NamedDict` of test-specific parameters.
-          - cli: A `NamedDict` with:
+          - krknPars:   A `NamedDict` of Krkn parameters.
+          - testPars:   A `NamedDict` of test-specific parameters.
+          - cli:
+            A `NamedDict` with:
               - oc: A `OCcli` instance.
               - virtCtl: A `VirtCtlCLI` instance.
-          - ns: Kubernetes Namespace.
-          - ExecOnNode: Node execution helper bound to `krknClient`.
+          - ns:         Kubernetes Namespace.
+          - ExecOnNode:
+            Node execution helper bound to `krknClient`, configured `ns` and
+            `ctrImgURL_ExecNode`; per-call `ns` and `ctrImg` keyword arguments
+            override these defaults.
     '''
     # Import lazily so the TCs are still collected if these modules are absent.
     from krkn_lib.ocp import KrknOpenshift
 
-    fxtCfg = _DEF__FXT_CFG | NamedDict(getattr(request, 'param', {}))
+    fxtCfg = _DEF__FXT_CFG | NamedDict(**getattr(request, 'param', {}))
 
     logs.info(
         f'Initializing `krkn-lib` client with `KUBECONFIG`: {fxtCfg.kCfg}'
     )
     krknClient = KrknOpenshift(kubeconfig_path=fxtCfg.kCfg)
 
-    yield KrknContext(
+    yield FxtObjKrkn(
         krknClient=krknClient,
         krknPars=fxtCfg.krknPars,
         testPars=fxtCfg.testPars,
@@ -197,7 +191,10 @@ def KrnChaos(
             virtCtl=fxtVirtCtlCLI(ns=fxtCfg.ns, **fxtCfg.cliCfg.vcCfg),
         ),
         ns=fxtCfg.ns,
-        ExecOnNode=partial(ExecOnNode, krknClient),
+        ExecOnNode=functools.partial(
+            ExecOnNode, krknClient,
+            ns=fxtCfg.ns, ctrImg=fxtCfg.ctrImgURL_ExecNode,
+        ),
     )
 
-    logs.info('The `krknChaos` fixture teardown complete.')
+    logs.info('The `fxtKrkn` fixture teardown complete.')

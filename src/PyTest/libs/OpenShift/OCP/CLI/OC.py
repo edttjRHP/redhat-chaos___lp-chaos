@@ -1,6 +1,6 @@
 '''Thin shim around the `oc` CLI.'''
 from enum import auto, IntEnum
-from typing import Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 from libs.Utils.CLI import GoCobraCLI
 from libs.Utils.CmdExec import CmdExec, CmdRes
@@ -27,7 +27,7 @@ class OCcli(GoCobraCLI):
         self,
         binExec: str = 'oc',
         cmdExec: Optional[CmdExec] = None,
-        **defOpts,
+        **defOpts: Any,
     ) -> None:
         '''
         :param binExec:
@@ -42,7 +42,8 @@ class OCcli(GoCobraCLI):
 
     def NewRes(
         self,
-        resOrYaml: Union[str, Dict],
+        resYAMLorSubCmd: Union[str, Dict],
+        isSecret: bool = False,
         waitCond: Optional[str] = 'create',
         waitTime: str = '2m',
     ) -> Tuple['OCcli.ResPhase', CmdRes]:
@@ -50,7 +51,7 @@ class OCcli(GoCobraCLI):
         Idempotent resource creation:
         `oc create ... --dry-run=client -o yaml --save-config | oc apply -f -`
 
-        Two modes based on `resOrYaml` type:
+        Two modes based on `resYAMLorSubCmd` type:
           - `str`
             Raw YAML manifest, used when there is no corresponding `oc create`
             sub-command.
@@ -60,7 +61,7 @@ class OCcli(GoCobraCLI):
             Calls
             `oc create <subCmd...> <args...> <opts...> --dry-run=client ...`
 
-        :param resOrYaml:
+        :param resYAMLorSubCmd:
             Either a raw YAML `str`, or a `dict` with keys:
               - 'subCmd': str    -> The `oc create` sub-commands
                                     (e.g. `'secret generic'`).
@@ -68,6 +69,9 @@ class OCcli(GoCobraCLI):
                                     (e.g. `['my-secret']`).
               - 'opts': Dict     -> The sub-commands keyword options
                                     (e.g. `{'from_literal': 'k=v'}`).
+        :param isSecret:
+            Forward framework log/record suppression to every producer and
+            consumer call. Raw results remain the caller's responsibility.
         :param waitCond:
             `oc wait --for` condition (default: `'create'`).
             Pass `None` to skip the wait step entirely.
@@ -81,26 +85,32 @@ class OCcli(GoCobraCLI):
               - WAITED   -> The "wait" completed (create).
             Check `lastCmdRes.success` for the outcome.
         '''
-        if isinstance(resOrYaml, str):
+        if isinstance(resYAMLorSubCmd, str):
             # YAML path: oc create -f - --dry-run=client -o yaml --save-config
             dryRun = self.Run(
                 'create', '-f', '-',
-                input=resOrYaml,
+                input=resYAMLorSubCmd,
+                isSecret=isSecret,
                 dry_run='client', o='yaml', save_config=True,
             )
         else:
-            # Subcommand path: oc create <subCmd> *args **opts --dry-run ...
-            createOpts = {**resOrYaml.get('opts', {}),
-                          'dry_run': 'client', 'o': 'yaml', 'save_config': True}
+            # Sub-command path: oc create <subCmd> *args **opts --dry-run ...
+            createOpts = {
+                **resYAMLorSubCmd.get('opts', {}),
+                'isSecret': isSecret,
+                'dry_run': 'client', 'o': 'yaml', 'save_config': True,
+            }
             dryRun = self.Run(
-                f"create {resOrYaml['subCmd']}",
-                *resOrYaml.get('args', []),
+                f"create {resYAMLorSubCmd['subCmd']}",
+                *resYAMLorSubCmd.get('args', []),
                 **createOpts,
             )
 
         if not dryRun.success: return (self.ResPhase.DRY_RUN, dryRun)
 
-        applied = self.Run('apply', '-f', '-', input=dryRun.stdout)
+        applied = self.Run(
+            'apply', '-f', '-', input=dryRun.stdout, isSecret=isSecret,
+        )
         if (not applied.success or (waitCond is None)):
             return (self.ResPhase.APPLIED, applied)
 
@@ -112,6 +122,7 @@ class OCcli(GoCobraCLI):
 
         return (self.ResPhase.WAITED, self.Run(
             'wait', resRef,
+            isSecret=isSecret,
             **{'for':  waitCond}, timeout=waitTime,
         ))
 

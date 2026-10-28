@@ -16,13 +16,15 @@ def FxtOCcli() -> Callable[..., OCcli]:
 
     Call with keyword options to configure defaults for the returned instance.
     Defaults to `n=LPQE__DEF__NAMESPACE` if not overridden.
+
+    :return: Function to make `OCcli` instance.
     '''
-    def _make(
+    def _Make(
         ns: str = LPQE__DEF__NAMESPACE,
         **defOpts: Any,
     ) -> OCcli:
         return OCcli(n=ns, **defOpts)
-    return _make
+    return _Make
 
 
 @pytest.fixture(name='fxtVirtCtlCLI', scope='module')
@@ -32,10 +34,12 @@ def FxtVirtCtlCLI() -> Callable[..., VirtCtlCLI]:
 
     Call with keyword options to configure defaults for the returned instance.
     Defaults to `n=LPQE__DEF__NAMESPACE` if not overridden.
+
+    :return: Function to make `VirtCtlCLI` instance.
     '''
-    def _make(
+    def _Make(
         ns: str = LPQE__DEF__NAMESPACE,
         **defOpts: Any,
     ) -> VirtCtlCLI:
         return VirtCtlCLI(n=ns, **defOpts)
-    return _make
+    return _Make

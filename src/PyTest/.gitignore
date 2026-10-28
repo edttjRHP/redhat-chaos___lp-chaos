@@ -13,9 +13,6 @@ env/
 .coverage
 htmlcov/
 
-# Generated at runtime by the vm_create fixture
-replaced_config/
-
 # Test/report output
 output/
 allure-results/

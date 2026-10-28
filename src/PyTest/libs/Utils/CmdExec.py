@@ -6,10 +6,11 @@ from typing import Dict, List, NamedTuple, Optional, Union
 
 logs = logging.getLogger(__name__)
 
+
 class CmdRes(NamedTuple):
     '''Structured immutable output for executed commands.'''
-    stdout: str
-    stderr: str
+    stdout: Optional[Union[str, bytes]]
+    stderr: Optional[Union[str, bytes]]
     exitCode: int
     success: bool
 
@@ -17,7 +18,7 @@ class CmdRes(NamedTuple):
 class CmdExec:
     '''Execute commands locally.'''
 
-    def __init__(self, defTryMax: int = 1, tryWait: int = 5):
+    def __init__(self, defTryMax: int = 1, tryWait: int = 5) -> None:
         self.defTryMax = defTryMax
         self.tryWait = tryWait
 
@@ -25,7 +26,9 @@ class CmdExec:
         self,
         command: Union[str, List[str]],
         shell: bool = False,
-        input: Optional[str] = None,
+        input: Optional[Union[str, bytes]] = None,
+        isSecret: bool = False,
+        warnOnFail: bool = True,
         tryMax: Optional[int] = None,
         spPars: Optional[Dict] = None,
     ) -> CmdRes:
@@ -34,7 +37,16 @@ class CmdExec:
 
         :param command: Command to execute (see `subprocess` for details).
         :param shell:   True to run via shell wrapper (use with caution).
-        :param input:   Optional string piped to the process's standard input.
+        :param input:
+            Optional string, piped to the process's standard input, passed
+            through `to subprocess.run()`.
+        :param isSecret:
+            Omit sensitive log values and recordings; keep safe metadata.
+            Raw results are unchanged and it is caller responsibility to ensure
+            it is NOT leaked.
+        :param warnOnFail:
+            Log non-zero exit code warning (default: `True`). Set to `False` to
+            suppresses the warning.
         :param tryMax:  Override the default maximum number of attempts.
         :param spPars:
             Optional `dict` of extra keyword arguments passed through
@@ -53,12 +65,20 @@ class CmdExec:
             try:
                 result = subprocess.run(command, **spArgs)
                 if result.returncode:
-                    logs.warning(
-                        f'Command failed with exit code {result.returncode} '
-                        f'(Try {tryCnt}/{tryMax}): {result.stderr.strip()}'
-                    )
+                    if warnOnFail:
+                        detail = (
+                            '[SNIPPED]' if isSecret
+                            else result.stderr.strip()
+                        )
+                        logs.warning(
+                            'Command failed with exit code '
+                            f'{result.returncode} (Try {tryCnt}/{tryMax}): '
+                            f'{detail}'
+                        )
                     if (tryCnt < tryMax):
-                        logs.info(f'Retrying execution in {self.tryWait} seconds...')
+                        logs.info(
+                            f'Retrying execution in {self.tryWait} seconds...'
+                        )
                         time.sleep(self.tryWait)
                         continue
                 return CmdRes(
@@ -68,15 +88,29 @@ class CmdExec:
                     success=(result.returncode == 0),
                 )
             except (FileNotFoundError, PermissionError) as ex:
-                logs.error(f'Critical environment exception: {ex}')
-                return CmdRes(stdout='', stderr=str(ex), exitCode=-2, success=False)
+                logs.error(
+                    'Critical environment exception '
+                    f'(Try {tryCnt}/{tryMax}): '
+                    f'{"[SNIPPED]" if isSecret else ex}'
+                )
+                return CmdRes(
+                    stdout='', stderr=str(ex), exitCode=-2, success=False,
+                )
             except subprocess.SubprocessError as ex:
-                logs.warning(f'Subprocess plumbing exception (Try {tryCnt}/{tryMax}): {ex}')
+                logs.warning(
+                    'Subprocess plumbing exception '
+                    f'(Try {tryCnt}/{tryMax}): '
+                    f'{"[SNIPPED]" if isSecret else ex}'
+                )
                 if (tryCnt < tryMax):
-                    logs.info(f'Retrying execution in {self.tryWait} seconds...')
+                    logs.info(
+                        f'Retrying execution in {self.tryWait} seconds...'
+                    )
                     time.sleep(self.tryWait)
                 else:
-                    return CmdRes(stdout='', stderr=str(ex), exitCode=-2, success=False)
+                    return CmdRes(
+                        stdout='', stderr=str(ex), exitCode=-2, success=False,
+                    )
 
         return CmdRes(
             stdout='',

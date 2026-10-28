@@ -1,17 +1,41 @@
-#!/usr/bin/env python3
 '''Defines custom types.'''
-
-
 from abc import ABCMeta
 from collections import defaultdict
-from typing import Any, Union
+import os
+from typing import Any, Union, Optional, Type
 
 
 class NamedDict(dict):
-    '''Immutable `dict` with `dot` access.'''
-    def __init__(self, *args, **kwargs) -> None:
-        self.____check_keys____(*args, **kwargs)
-        super().__init__(*args, **kwargs)
+    '''
+    A `dict` with dot access.
+
+    The attribute/item assignment is blocked. Use `___update___()` instead.
+
+    Deep merge (`|`):
+        For a key present in both `base` and `override`:
+          - If `base[key]` is `None`, set to `override[key]`.
+          - If `override[key]` is `None`, set to it.
+          - Otherwise, `base[key]` and `override[key]` must have exactly the
+            same type.
+          - Matching `dict` or `NamedDict` values recurse.
+          - Matching `list` concatenate into a new `list`, retaining order,
+            duplicates and item identities without mutating either input
+            `list`.
+          - Other matching values replace.
+        Use `NamedDict._TypeReplace(value)` to replace the value of a node.
+            If the node's current value is not None and `value` is not None,
+            their types must match.
+
+    New keys retain their supplied values.
+    '''
+    class _TypeReplace:
+        def __init__(self, value: Any) -> None:
+            self.value = value
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        data = dict(*args, **kwargs)
+        self.____check_keys____(data)
+        super().__init__(data)
 
     def __getattribute__(self, key: str) -> Any:
         if (key in (
@@ -44,7 +68,7 @@ class NamedDict(dict):
 
     __setitem__ = __setattr__
 
-    def ____check_keys____(self, *args, **kwargs) -> None:
+    def ____check_keys____(self, *args: Any, **kwargs: Any) -> None:
         keys = ()
         if args:
             if hasattr(args[0], 'keys'):
@@ -59,19 +83,23 @@ class NamedDict(dict):
         for key in keys:
             if not (isinstance(key, str) and key.isidentifier()):
                 raise KeyError(
-                    f"Attribute ({repr(key)}) on "
+                    f'Attribute ({repr(key)}) on '
                     f"{repr(super().__getattribute__('__class__'))} instance "
-                    "must be a valid python identifier.",
+                    'must be a valid python identifier.',
                 )
 
-    def ___update___(self, *args, **kwargs) -> None:
-        self.____check_keys____(*args, **kwargs)
-        super().update(*args, **kwargs)
+    def ___update___(self, *args: Any, **kwargs: Any) -> None:
+        data = dict(*args, **kwargs)
+        self.____check_keys____(data)
+        super().update(data)
 
     # Shallow Merge (+).
     def __add__(self, other: Any) -> 'NamedDict':
         if not isinstance(other, dict): return NotImplemented
         return NamedDict({**self, **other})
+
+    __iadd__ = __add__
+
     def __radd__(self, other: Any) -> 'NamedDict':
         if not isinstance(other, dict): return NotImplemented
         return NamedDict({**other, **self})
@@ -80,17 +108,38 @@ class NamedDict(dict):
     def _DeepMerge(
             base: Union['NamedDict', dict],
             override: Union['NamedDict', dict],
+            keyPath: str = '',
     ) -> Union['NamedDict', dict]:
+        '''Replace nullable values; otherwise deep-merge exact types.'''
         merged = dict(base)
         for (k, v) in dict.items(override):
+            replace = isinstance(v, NamedDict._TypeReplace)
+            if replace: v = v.value
             if (
                 (k in merged) and
-                (type(v) in (NamedDict, dict)) and
-                (type(merged[k]) is type(v))
+                (merged[k] is not None) and
+                (v is not None)
             ):
-                merged[k] = NamedDict._DeepMerge(merged[k], v)
-            else:
-                merged[k] = v
+                if (type(merged[k]) is not type(v)):
+                    raise TypeError('NamedDict ' + (
+                        'replacement via `NamedDict._TypeReplace` ' \
+                            if replace else 'deep-merge '
+                    ) +  (
+                        f'at `{keyPath}[{k!r}]`: '
+                        f'expected `{type(merged[k]).__name__}`, received '
+                        f'`{type(v).__name__}`.'
+                    ))
+                if not replace:
+                    if (type(v) in (NamedDict, dict)):
+                        merged[k] = NamedDict._DeepMerge(
+                            merged[k], v, f'{keyPath}[{k!r}]',
+                        )
+                        continue
+                    if (type(v) is list):
+                        # The `list.extend()` also modify the `base`.
+                        merged[k] = merged[k] + v
+                        continue
+            merged[k] = v
         return (merged if (type(base) is dict) else NamedDict(merged))
 
     # Deep Merge (|).
@@ -102,17 +151,20 @@ class NamedDict(dict):
             )
         return NamedDict(NamedDict._DeepMerge(self, other))
 
+    __ior__ = __or__
+
     def __ror__(self, other: Any) -> 'NamedDict':
         if not isinstance(other, dict): return NotImplemented
         return NamedDict(NamedDict._DeepMerge(other, self))
 
 
-class NestedDict(defaultdict):
+class NestedDefDict(defaultdict):
     '''Nested `dict`.'''
-    def __init__(self, *args, **kwargs):
-        super().__init__(NestedDict, *args, **kwargs)
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        if (args and (args[0] is NestedDefDict)): args = args[1:]
+        super().__init__(NestedDefDict, *args, **kwargs)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return repr(dict(self))
 
 
@@ -120,7 +172,37 @@ class SingletonMeta(ABCMeta):
     '''MetaClass to make a derived class as singleton.'''
     __instances = {}
 
-    def __call__(cls, *args, **kwargs):
+    def __call__(cls, *args: Any, **kwargs: Any) -> Any:
         if (cls not in cls.__instances):
             cls.__instances[cls] = super().__call__(*args, **kwargs)
         return cls.__instances[cls]
+
+
+class TempEnv:
+    '''
+    Context Manager providing an env. where any alteration of Env. Variables
+    are only temporary and will be automatically reverted back.
+    '''
+    def __enter__(self) -> 'TempEnv':
+        self.origEnv = dict(os.environ)
+        return self
+
+    def __exit__(
+        self,
+        excType: Optional[Type[BaseException]],
+        excValue: Optional[BaseException],
+        traceback: object,
+    ) -> bool:
+        origKeys = self.origEnv.keys()
+        currentKeys = set(os.environ)
+
+        # Remove Env. Variables added while this context was active.
+        for key in (currentKeys - origKeys):
+            os.environ.pop(key, None)
+
+        # Restore Env. Variables that were unset and/or altered.
+        for key, origValue in self.origEnv.items():
+            if (os.environ.get(key) != origValue):
+                os.environ[key] = origValue
+
+        return False

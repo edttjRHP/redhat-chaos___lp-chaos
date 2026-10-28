@@ -20,16 +20,18 @@ def CommandExecutor(result: CmdRes) -> mock.MagicMock:
 
 
 def test__DiscoverOptions_ParsesShortLongAndStdErr() -> None:
-    executor = CommandExecutor(CmdRes(optionsText, '      --token string\n', 0, True))
+    executor = CommandExecutor(
+        CmdRes(optionsText, '      --token string\n', 0, True),
+    )
 
     cli = MUT.GoCobraCLI('oc', cmdExec=executor, namespace='default')
 
-    assert cli.cmnOpts == {
+    assert (cli.cmnOpts == {
         'namespace': {'short': '-n', 'long': '--namespace'},
         'kubeconfig': {'short': None, 'long': '--kubeconfig'},
         'token': {'short': None, 'long': '--token'},
-    }
-    assert cli.shortMap == {'-n': 'namespace'}
+    })
+    assert (cli.shortMap == {'-n': 'namespace'})
     executor.Run.assert_called_once_with(['oc', 'options'])
 
 
@@ -41,18 +43,20 @@ def test__DiscoverOptions_FailureLeavesMapsEmpty(
     with caplog.at_level('WARNING', logger='libs.Utils.CLI'):
         cli = MUT.GoCobraCLI('missing tool', cmdExec=executor)
 
-    assert cli.cmnOpts == {}
-    assert cli.shortMap == {}
-    assert 'Failed to discover' in caplog.text
+    assert (cli.cmnOpts == {})
+    assert (cli.shortMap == {})
+    assert ('Failed to discover' in caplog.text)
 
 
-def test_Init_DefaultExecutorIsCreated(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_Init_DefaultExecutorIsCreated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     Utils.AutoPatch(monkeypatch, MUT, 'CmdExec')
     MUT.CmdExec.return_value.Run.return_value = CmdRes('', '', 1, False)
 
     cli = MUT.GoCobraCLI('tool')
 
-    assert cli.cmdExec is MUT.CmdExec.return_value
+    assert (cli.cmdExec is MUT.CmdExec.return_value)
     MUT.CmdExec.assert_called_once_with()
 
 
@@ -101,22 +105,39 @@ def test_Run_BuildsCobraCommandAndOverridesDefaults() -> None:
     executor.Run.assert_called_once_with(
         [
             'oc',
-            '--namespace',
-            'other',
-            '-n',
-            'short',
+            '--namespace=other',
+            '-n=short',
             'get',
             'pods',
             '--no-headers=true',
             '--enabled=false',
-            '--output',
-            'json',
+            '--output=json',
             'pod-one',
             '2',
             '3.5',
         ],
         input='stdin',
         spPars={'timeout': 2},
+        isSecret=False,
+    )
+
+
+def test_Run_SerializesDryRunAsSingleArgument() -> None:
+    executor = CommandExecutor(CmdRes(optionsText, '', 0, True))
+    cli = MUT.GoCobraCLI('oc', cmdExec=executor)
+    executor.Run.reset_mock()
+
+    cli.Run(
+        'create namespace', 'vm-test',
+        dry_run='client', o='yaml', save_config=True,
+    )
+
+    executor.Run.assert_called_once_with(
+        [
+            'oc', 'create', 'namespace', '--dry-run=client',
+            '-o=yaml', '--save-config=true', 'vm-test',
+        ],
+        input=None, spPars=None, isSecret=False,
     )
 
 
@@ -139,3 +160,24 @@ def test_Run_RejectsInvalidOption() -> None:
 
     with pytest.raises(TypeError, match="Option 'bad'"):
         cli.Run('do', bad=[])
+
+
+@pytest.mark.parametrize('isSecret', [False, True])
+def test_Run_SecretFlagIsExecutorMetadataNotCLIOption(
+    isSecret: bool,
+) -> None:
+    executor = CommandExecutor(CmdRes(optionsText, '', 0, True))
+    cli = MUT.GoCobraCLI('oc', cmdExec=executor, namespace='selected')
+    executor.Run.reset_mock()
+    expected = CmdRes('raw-output', 'raw-error', 9, False)
+    executor.Run.return_value = expected
+    result = cli.Run(
+        'create', 'secret', input='synthetic-payload',
+        spPars={'timeout': 4}, isSecret=isSecret,
+    )
+    assert (result is expected)
+    executor.Run.assert_called_once_with(
+        ['oc', '--namespace=selected', 'create', 'secret'],
+        input='synthetic-payload', spPars={'timeout': 4},
+        isSecret=isSecret,
+    )

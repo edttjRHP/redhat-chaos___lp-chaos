@@ -10,7 +10,7 @@ finishes.
 The suite uses markers to group scenarios by capability:
   - The `vm` covers single-VM provisioning through the local template or benchmark-runner and guest interaction.
   - The `vm__br` covers two-VM provisioning through benchmark-runner.
-  - The `krkn` covers krkn-lib pod and node scenarios.
+  - The `krkn` covers krkn / krkn-hub Chaos scenarios.
 
 Scenario configuration is passed through PyTest parametrization. This lets an example select such things as its
 Namespace, VM count, VM identity, or recovery window while the framework owns common setup and cleanup. The reader does
@@ -19,8 +19,8 @@ not need to understand the fixture implementation to run or assess a scenario.
 
 ## Lifecycle
 
-PyTest first loads shared cluster, VM, benchmark-runner, and krkn-lib capabilities. For a selected scenario, the
-lifecycle is:
+PyTest first loads shared cluster, VM, benchmark-runner, and krkn/krkn-hub capabilities. Tool backends run in isolated
+venvs via subprocess. For a selected scenario, the lifecycle is:
  1. Read the scenario configuration and establish the requested CLI or library access.
  2. Provision VMs when the scenario requests framework-managed VMs, or connect to the existing VM named by a chaos
     scenario.
@@ -37,9 +37,9 @@ outside that ownership boundary, although a chaos scenario may intentionally dis
 The local-template example uses `fxtVM` to create and start one VM and check a fixed PowerShell response via SSH.
 The other examples cover single-VM and two-VM provisioning through `fxtVMbyBR` (`count=1` and `count=2`), guest file or
 command access, launcher-pod recovery, and read-only worker-node inspection. Both benchmark-runner examples use the
-`FxtObjVMbyBR` bundle; the first accesses `vmList[0]`. Benchmark-runner's upstream configuration-capture blocker and
-runtime dependency compatibility remain unresolved. Some example values and local file operations are
-environment-specific.
+`FxtObjVMbyBR` bundle; the first accesses `vmList[0]`. Benchmark-runner's upstream configuration-capture blocker may
+still apply inside its tool venv; shared-site-packages conflicts are avoided by process isolation. Some example values
+and local file operations are environment-specific.
 
 See the [fxtVM configuration schema](../fixtures/VM.py) for VM inputs.
 Use `cfgFile` (formerly `configFile`) for the manifest template.
@@ -84,5 +84,5 @@ Create the documented Python environment, then inspect what PyTest would select 
 Only remove `--collect-only` after reviewing the selected scenarios and target environment. The VM and chaos groups can
 create, delete, or disrupt cluster resources.
 
-See [`benchmark-runner` integration](guide--benchmark-runner.md) and [`krkn-lib integration`](guide--krkn-lib.md) for
-the responsibilities of those optional paths.
+See [`benchmark-runner` integration](guide--benchmark-runner.md) and [krkn / krkn-hub integration](guide--krkn-lib.md)
+for the responsibilities of those optional paths.

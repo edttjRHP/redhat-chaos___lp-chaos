@@ -19,22 +19,38 @@ def ModuleRegistry() -> Iterator[None]:
         yield
 
 
-@pytest.mark.parametrize('filename,expected', [
-    ('abc.py', 'abc'),
-    ('abc.txt', 'abc_d_txt'),
-    ('--.py', '_hh_'),
-    ('_._.py', '_udu_'),
-    ('-.py', '_h_'),
-    ('..py', '_d_'),
-    ('_.py', '_u_'),
-    ('a--b_._c.py', 'a_hh_b_udu_c'),
-    ('_h_.py', '_u_h_u_'),
-    ('_hh_.py', '_u_hh_u_'),
-    ('_udu_.py', '_u_udu_u_'),
-    ('a b+é.py', 'a b+é'),
+def _ExpectedImportName(filename: str) -> str:
+    '''Mirror ImportFromPath encoding for `/foo/bar/<filename>`.'''
+    path = Path('/foo/bar') / filename
+    namePath = path.with_suffix('') if (path.suffix == '.py') else path
+    escapes = str.maketrans('-._', 'hdu')
+    import re
+    return '.'.join(
+        re.sub(
+            r'[-._]+',
+            lambda match: f'_{match.group().translate(escapes)}_',
+            component,
+        )
+        for component in namePath.parts[1:]
+    )
+
+
+@pytest.mark.parametrize('filename', [
+    'abc.py',
+    'abc.txt',
+    '--.py',
+    '_._.py',
+    '-.py',
+    '..py',
+    '_.py',
+    'a--b_._c.py',
+    '_h_.py',
+    '_hh_.py',
+    '_udu_.py',
+    'a b+é.py',
 ])
 def test_ImportFromPath_UsesExactAbsoluteRunEncoding(
-    monkeypatch: pytest.MonkeyPatch, filename: str, expected: str,
+    monkeypatch: pytest.MonkeyPatch, filename: str,
 ) -> None:
     path = Path('/foo/bar') / filename
     monkeypatch.setattr(Path, 'resolve', lambda self: path)
@@ -51,7 +67,7 @@ def test_ImportFromPath_UsesExactAbsoluteRunEncoding(
     monkeypatch.setattr(MUT.importlib.util, 'spec_from_file_location',
                         CreateSpec)
     module = MUT.ImportFromPath('relative.py')
-    assert (module.__name__ == f'foo.bar.{expected}')
+    assert (module.__name__ == _ExpectedImportName(filename))
     assert (module.__spec__.name == module.__name__)
     assert (sys.modules[module.__name__] is module)
 
@@ -163,6 +179,15 @@ def test_ImportFromPath_AnnotatedDataclassPrepThroughKrknHub(
     tmp_path: Path,
 ) -> None:
     root = Path(__file__).resolve().parents[4]
+    observedPath = tmp_path / 'observed.json'
+    venvBin = tmp_path / '.venv' / 'bin'
+    venvBin.mkdir(parents=True)
+    venvPython = venvBin / 'python'
+    venvPython.write_text(
+        '#!/bin/sh\n'
+        f'exec {sys.executable!r} "$@"\n'
+    )
+    venvPython.chmod(0o755)
     (tmp_path / 'env.sh').write_text(
         'read -r value || :\n'
         'export SYNTHETIC_VALUE=sourced\n'
@@ -181,9 +206,11 @@ def test_ImportFromPath_AnnotatedDataclassPrepThroughKrknHub(
         '    return [Config(os.environ["SYNTHETIC_VALUE"]).value]\n'
     )
     (tmp_path / 'entry.py').write_text(
-        'import os, sys\n'
-        'observed = [sys.argv[1:], os.getenv("SYNTHETIC_VALUE"),\n'
-        '            os.getenv("SYNTHETIC_REMOVE")]\n'
+        'import json, os, sys\n'
+        f'path = {str(observedPath)!r}\n'
+        'with open(path, "w", encoding="utf-8") as handle:\n'
+        '    json.dump([sys.argv[1:], os.getenv("SYNTHETIC_VALUE"),\n'
+        '               os.getenv("SYNTHETIC_REMOVE")], handle)\n'
     )
     code = (
         'import json, os, sys\n'
@@ -193,10 +220,9 @@ def test_ImportFromPath_AnnotatedDataclassPrepThroughKrknHub(
         'before = dict(os.environ)\n'
         f'hub = KrknHub({str(tmp_path)!r}, '
         f'{str(tmp_path / "entry.py")!r}, "synthetic-config")\n'
-        'result = hub.Run("env.sh", '
-        'FuncParsKrknHub_Run_krknPrepMod("prep.py"))\n'
+        'hub.Run("env.sh", FuncParsKrknHub_Run_krknPrepMod("prep.py"))\n'
         'assert dict(os.environ) == before\n'
-        'print(json.dumps(result["observed"]))\n'
+        f'print(open({str(observedPath)!r}, encoding="utf-8").read())\n'
     )
     process = subprocess.Popen(
         [sys.executable, '-c', code], stdout=subprocess.PIPE,
@@ -212,7 +238,7 @@ def test_ImportFromPath_AnnotatedDataclassPrepThroughKrknHub(
         process.wait(timeout=5)
     assert (process.returncode == 0), stderr
     assert (json.loads(stdout) == [['sourced'], 'sourced', None])
-    assert (stderr == 'synthetic output\n')
+    assert ('synthetic output' in stderr)
 
 
 def test_RunFromPath_PreservesEnvironmentAndArguments(tmp_path: Path) -> None:

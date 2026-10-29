@@ -5,20 +5,26 @@ VM-provisioning backend for OpenShift Virtualization. It complements the reposit
 both a single Windows VM and a scaled group of VMs while presenting the same VM-oriented experience to a PyTest
 scenario.
 
+`benchmark-runner` runs in its **own virtualenv** via subprocess. Its dependency pins are never installed into the
+PyTest `.venv`.
+
 
 ## What The Integration Provides
 
 The intended setup path translates scenario configuration into a benchmark-runner workload and asks it to create the
-requested VMs. The fixture calls `brMain` and reconciles VM UIDs; it does not independently wait for VM availability.
-In the reviewed benchmark-runner sources, configuration and dispatch are cached before the fixture's temporary context
-swap (known F2). This integration remains blocked pending upstream resolution, with runtime dependency compatibility
-also unresolved. After successful provisioning, the scenario can use the framework's normal VM and guest-connectivity
-capabilities. During teardown, the framework removes only the VMs it identified as belonging to that test run.
+requested VMs. The fixture invokes `benchmark_runner.main.main.main()` inside the tool venv with uppercase OS
+environment variables (`WORKLOAD`, `RUN_TYPE`, `NAMESPACE`, `DELETE_ALL`, `RUN_ARTIFACTS_PATH`, `UUID`, `SCALE`,
+`SCALE_NODES`) and reconciles VM UIDs afterward; it does not independently wait for VM availability.
+
+In the reviewed benchmark-runner sources, configuration and dispatch are cached before temporary context swaps in some
+in-process paths (known F2). Process isolation avoids the shared-site-packages conflict; F2 may still affect BR's own
+behavior depending on upstream version. After successful provisioning, the scenario can use the framework's normal VM
+and guest-connectivity capabilities. During teardown, the framework removes only the VMs it identified as belonging to
+that test run.
 
 The BR `vm` example requests one VM and uses `fxtVMbyBR.vmList[0]` for guest commands and file transfer. The `vm__br`
 example requests two VMs, confirms that both were returned, and checks guest SSH service reachability. These are
-provisioning and connectivity examples, not benchmarks, BSOD injection, or broad scale tests; execution remains subject
-to the blockers above.
+provisioning and connectivity examples, not benchmarks, BSOD injection, or broad scale tests.
 
 
 ## Fixture API
@@ -28,6 +34,11 @@ and `workloadKind='vm'` defaults. Override it with, for example,
 `fxtVMbyBR.vmCreate(brCfg=NamedDict(workloadName='windows_scale'))`, using
 `from libs.CustomTypes import NamedDict` as with other nested overrides.
 Top-level `workloadName` and `workloadKind` overrides are no longer used.
+
+Tool location:
+  - `brCfg.rootPath` (default `vendor/benchmark-runner`, overridable via
+    `IENG_PYTEST____FXT__BR____DEF_FXT_CFG__ROOTPATH`)
+  - `brCfg.python` (optional; default `<rootPath>/.venv/bin/python`)
 
 The module-scoped `fxtVMbyBR` fixture yields a frozen `FxtObjVMbyBR` bundle. Its `vmList` field holds every VM wrapper
 managed by the fixture. Its `vmCreate` field is a callable that accepts the same configuration as the fixture, creates
@@ -48,10 +59,16 @@ whose current UID still matches the UID recorded after benchmark-runner created 
 
 ## Prerequisites and Selection
 
-The `benchmark-runner` must be installed in the same Python environment as the test suite. The selected cluster must
-already provide OpenShift Virtualization and a usable Windows image, and the local environment must provide
-authenticated `oc` and `virtctl` access. Scaled provisioning also needs an eligible worker-node selection understood by
-benchmark-runner.
+Install the benchmark-runner tool venv (does **not** go into the PyTest `.venv`):
+```bash
+cd src/PyTest
+# Optional: export BR_SRC=/path/to/benchmark-runner
+./scripts/setup-tool-venvs.sh
+```
+
+The selected cluster must already provide OpenShift Virtualization and a usable Windows image, and the local
+environment must provide authenticated `oc` and `virtctl` access. Scaled provisioning also needs an eligible
+worker-node selection understood by benchmark-runner (`WORKER_NODE`).
 
 After confirming the target environment and workload configuration, collect the benchmark-runner examples with:
 ```bash

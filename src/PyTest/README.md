@@ -13,8 +13,8 @@ orchestration.
 | PyTest                        | Organizes selection, fixtures, assertions, and reporting.         |
 | Configuration utilities       | Merge fixture settings and render Jinja2/YAML configuration.      |
 | OpenShift Virtualization      | Provides VM lifecycle and guest access through CLI/SSH wrappers.  |
-| benchmark-runner              | Provides an alternative path for provisioning one or more VMs.    |
-| krkn-lib                      | Provides Pod and Node operations for resiliency scenarios.        |
+| benchmark-runner              | Provisions VMs via a dedicated tool venv (subprocess).            |
+| krkn / krkn-hub               | Runs Chaos scenarios via a dedicated krkn tool venv (subprocess). |
 
 The `conftest.py` registers the `fxtOCcli`, `fxtVirtCtlCLI`, `fxtVM`,`fxtVMbyBR`, and `fxtKrkn` fixtures. Indirect
 parametrization supplies fixture settings (use `NamedDict` for nested settings that need dot access). The VM fixtures
@@ -57,8 +57,8 @@ injection, Guest OS crash detection, or crash-dump collection and analysis.
 Limitations:
   - The example suite is environment-specific and should not be treated as a portable acceptance suite.
   - The single-VM benchmark-runner example's local file paths require adaptation.
-  - Both benchmark-runner examples remain blocked by upstream configuration capture and unresolved runtime dependency
-    compatibility; see the [benchmark-runner guide](docs/guide--benchmark-runner.md).
+  - Both benchmark-runner examples remain blocked by upstream configuration capture; dependency isolation is handled via
+    tool venvs. See the [benchmark-runner guide](docs/guide--benchmark-runner.md).
   - See the [fxtVM configuration schema](fixtures/VM.py) for VM inputs.
   - Scaled benchmark-runner provisioning reads `WORKER_NODE`; workload/image preparation and matching Guest OS
     credentials remain caller responsibilities.
@@ -97,8 +97,12 @@ key.
 
 ## Getting Started
 
-Run from the repository root with Python 3.11. For local discovery, the isolated-unit dependencies are sufficient
-because `benchmark-runner` and `krkn-lib` are imported only when their fixtures execute:
+Run from the repository root with Python 3.11. The PyTest process uses its own `.venv`. `benchmark-runner` and `krkn`
+each run in a separate tool venv under `vendor/` (created by `scripts/setup-tool-venvs.sh`) so their dependency pins
+never share the test-suite environment.
+
+For local discovery, the isolated-unit dependencies are sufficient because the tool fixtures invoke subprocesses only
+when those scenarios execute:
 ```bash
 cd src/PyTest
 python3.11 -m venv .venv
@@ -109,7 +113,21 @@ python3.11 -m venv .venv
 .venv/bin/python -m pytest -c pytest.ini test--suites/ -m krkn --collect-only
 ```
 
-Before executing any scenario, verify compatible runtime dependencies and address applicable example limitations.
+Before executing BR or Krkn scenarios, install the tool venvs (and clone sources as needed):
+```bash
+# Optional: point at existing checkouts
+# export BR_SRC=/path/to/benchmark-runner
+# export KRKN_SRC=/path/to/krkn
+./scripts/setup-tool-venvs.sh
+# Clone krkn-hub into vendor/krknHub (or set
+# IENG_PYTEST____FXT__KRKN____DEF_FXT_CFG__ROOTPATH_KRKNHUB).
+```
+
+Override tool roots without reinstalling under `vendor/`:
+  - `IENG_PYTEST____FXT__BR____DEF_FXT_CFG__ROOTPATH`
+  - `IENG_PYTEST____FXT__KRKN____DEF_FXT_CFG__ROOTPATH_KRKN`
+  - `IENG_PYTEST____FXT__KRKN____DEF_FXT_CFG__ROOTPATH_KRKNHUB`
+
 Review the Namespace, VM identity, CLI context, and Krkn's kubeconfig together. Run only on an authorized, disposable
 OpenShift Virtualization environment with the required `oc`, `virtctl`, OpenSSH tools, credentials, images, and Guest
 access.

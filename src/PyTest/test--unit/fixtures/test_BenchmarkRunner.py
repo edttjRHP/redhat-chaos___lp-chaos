@@ -1,7 +1,6 @@
 from dataclasses import FrozenInstanceError
 import json
-import sys
-import types
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -10,57 +9,22 @@ import pytest
 import fixtures.BenchmarkRunner as MUT
 from libs.CustomTypes import NamedDict
 from libs.OpenShift.OCP.CLI.OC import OCcli
+from libs.Utils.CmdExec import CmdRes
 import Utils
 
 
-class BenchmarkRunnerModules:
-    def __init__(self, environment: dict[str, object]) -> None:
-        self.brMain = mock.MagicMock(name='benchmarkRunnerMain')
-        self.temporaryEnvironment = mock.MagicMock(
-            name='TemporaryEnvironmentVariables',
-        )
-        self.temporaryEnvironment.return_value.__enter__.return_value = None
-        self.temporaryEnvironment.return_value.__exit__.return_value = False
-
-        package = types.ModuleType('benchmark_runner')
-        package.__path__ = []
-        mainPackage = types.ModuleType('benchmark_runner.main')
-        mainPackage.__path__ = []
-        environmentModule = types.ModuleType(
-            'benchmark_runner.main.environment_variables',
-        )
-        environmentModule.environment_variables = SimpleNamespace(
-            environment_variables_dict=environment,
-        )
-        mainModule = types.ModuleType('benchmark_runner.main.main')
-        mainModule.main = self.brMain
-        temporaryModule = types.ModuleType(
-            'benchmark_runner.main.temporary_environment_variables',
-        )
-        temporaryModule.TemporaryEnvironmentVariables = (
-            self.temporaryEnvironment
-        )
-        self.modules = {
-            'benchmark_runner': package,
-            'benchmark_runner.main': mainPackage,
-            'benchmark_runner.main.environment_variables': environmentModule,
-            'benchmark_runner.main.main': mainModule,
-            'benchmark_runner.main.temporary_environment_variables':
-                temporaryModule,
-        }
-
-
-def PatchModules(
-    monkeypatch: pytest.MonkeyPatch,
-    runner: BenchmarkRunnerModules,
-) -> None:
-    for (name, module) in runner.modules.items():
-        monkeypatch.setitem(sys.modules, name, module)
+def PatchRunInVenv(monkeypatch: pytest.MonkeyPatch) -> mock.MagicMock:
+    Utils.AutoPatch(monkeypatch, MUT, 'RunInVenv')
+    MUT.RunInVenv.return_value = CmdRes('', '', 0, True)
+    return MUT.RunInVenv
 
 
 def test__DEF__FXT_CFG_UsesNestedWorkloadConfiguration() -> None:
     cfg = MUT._DEF__FXT_CFG
-    assert (cfg.brCfg == NamedDict(workloadName='windows', workloadKind='vm'))
+    assert (cfg.brCfg.workloadName == 'windows')
+    assert (cfg.brCfg.workloadKind == 'vm')
+    assert ('rootPath' in cfg.brCfg)
+    assert ('python' in cfg.brCfg)
     assert ('workloadName' not in cfg)
     assert ('workloadKind' not in cfg)
     merged = cfg | NamedDict(brCfg=NamedDict(workloadKind='custom'))
@@ -108,12 +72,11 @@ def test_FxtVMbyBR_RetainsSetupAndIsolatesTemporaryOverrides(
         (True, '', ''), (True, 'uid-two', ''),
         (True, '', ''), (True, 'uid-three', ''),
     ]
-    runner = BenchmarkRunnerModules({'run_artifacts_path': '/tmp'})
-    PatchModules(monkeypatch, runner)
+    runInVenv = PatchRunInVenv(monkeypatch)
     setup = {
         'count': 0,
         'ns': 'setup-ns',
-        'brCfg': NamedDict(workloadName='setup'),
+        'brCfg': NamedDict(workloadName='setup', rootPath=Path('/br')),
         'cliCfg': NamedDict(
             ocCfg={'context': 'setup-context'},
             vcCfg={'kubeconfig': '/setup-config'},
@@ -128,7 +91,7 @@ def test_FxtVMbyBR_RetainsSetupAndIsolatesTemporaryOverrides(
     }
     (setupBefore, overridesBefore, defaultsBefore) = json.loads(json.dumps((
         setup, overrides, MUT._DEF__FXT_CFG,
-    )))
+    ), default=str))
     ocFactory = mock.MagicMock()
     virtCtlFactory = mock.MagicMock()
     request = SimpleNamespace(param=setup)
@@ -137,7 +100,7 @@ def test_FxtVMbyBR_RetainsSetupAndIsolatesTemporaryOverrides(
     )
     bundle = next(generator)
     fPars = bundle.vmCreate.args[1]
-    configBefore = json.loads(json.dumps(fPars.fxtCfgObj))
+    configBefore = json.loads(json.dumps(fPars.fxtCfgObj, default=str))
     assert (bundle.vmList is fPars.vmList)
     assert (bundle.vmCreate() == [])
     request.param = {'count': -1, 'ns': 'ignored-later-request'}
@@ -164,10 +127,14 @@ def test_FxtVMbyBR_RetainsSetupAndIsolatesTemporaryOverrides(
     assert ([call.kwargs['name'] for call in MUT.VM.call_args_list] == [
         'setup-vm-first', 'setup-vm-second', 'setup-vm-third',
     ])
-    assert (fPars.fxtCfgObj == configBefore)
-    assert (setup == setupBefore)
-    assert (overrides == overridesBefore)
-    assert (MUT._DEF__FXT_CFG == defaultsBefore)
+    assert (json.loads(json.dumps(fPars.fxtCfgObj, default=str)) ==
+            configBefore)
+    assert (json.loads(json.dumps(setup, default=str)) == setupBefore)
+    assert (json.loads(json.dumps(overrides, default=str)) ==
+            overridesBefore)
+    assert (json.loads(json.dumps(MUT._DEF__FXT_CFG, default=str)) ==
+            defaultsBefore)
+    assert (runInVenv.call_count == 3)
     generator.close()
     (cleanupVMs, cleanupOwnership) = MUT.VM.CleanUpVMs.call_args.args
     assert (cleanupVMs is bundle.vmList)
@@ -192,8 +159,7 @@ def test_FxtVMbyBR_DefaultSetupIsRetainedAcrossCalls(
         (True, '', ''), (True, 'initial-uid', ''),
         (True, '', ''), (True, 'later-uid', ''),
     ]
-    runner = BenchmarkRunnerModules({'run_artifacts_path': '/tmp'})
-    PatchModules(monkeypatch, runner)
+    runInVenv = PatchRunInVenv(monkeypatch)
     request = (
         SimpleNamespace(param={}) if hasRequestParam else SimpleNamespace()
     )
@@ -203,17 +169,18 @@ def test_FxtVMbyBR_DefaultSetupIsRetainedAcrossCalls(
     bundle = next(generator)
     assert (len(bundle.vmCreate()) == 1)
     assert (len(bundle.vmList) == 2)
-    assert (runner.brMain.call_count == 2)
+    assert (runInVenv.call_count == 2)
     generator.close()
 
 
-def test_VMcreateByBR_NegativeCountIsRejectedBeforeImportingRunner(
+def test_VMcreateByBR_NegativeCountIsRejectedBeforeInvokingRunner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     Utils.AutoPatch(monkeypatch, MUT.tempfile, 'mkdtemp')
+    runInVenv = PatchRunInVenv(monkeypatch)
     vmList = []
     ownVMs = []
     ocFactory = mock.MagicMock()
@@ -238,6 +205,7 @@ def test_VMcreateByBR_NegativeCountIsRejectedBeforeImportingRunner(
     OCcli.GetResUID.assert_not_called()
     MUT.uuid4.assert_not_called()
     MUT.tempfile.mkdtemp.assert_not_called()
+    runInVenv.assert_not_called()
 
 
 def test_VMcreateByBR_ZeroCountReturnsEmptyWithoutRunner(
@@ -247,12 +215,11 @@ def test_VMcreateByBR_ZeroCountReturnsEmptyWithoutRunner(
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     Utils.AutoPatch(monkeypatch, MUT.tempfile, 'mkdtemp')
+    runInVenv = PatchRunInVenv(monkeypatch)
     vmList = []
     ownVMs = []
     ocFactory = mock.MagicMock()
     virtCtlFactory = mock.MagicMock()
-    runner = BenchmarkRunnerModules({'run_artifacts_path': '/tmp'})
-    PatchModules(monkeypatch, runner)
 
     result = MUT.VMcreateByBR(
         SimpleNamespace(),
@@ -273,8 +240,7 @@ def test_VMcreateByBR_ZeroCountReturnsEmptyWithoutRunner(
     OCcli.GetResUID.assert_not_called()
     MUT.uuid4.assert_not_called()
     MUT.tempfile.mkdtemp.assert_not_called()
-    runner.brMain.assert_not_called()
-    runner.temporaryEnvironment.assert_not_called()
+    runInVenv.assert_not_called()
 
 
 def test_VMcreateByBR_SingleVMhappyPathUsesGeneratedIdentityKey(
@@ -290,12 +256,12 @@ def test_VMcreateByBR_SingleVMhappyPathUsesGeneratedIdentityKey(
         (True, '', ''),
         (True, 'uid-one', ''),
     ]
-    runner = BenchmarkRunnerModules({'run_artifacts_path': '/artifacts'})
-    PatchModules(monkeypatch, runner)
+    runInVenv = PatchRunInVenv(monkeypatch)
     ocFactory = mock.MagicMock(name='ocFactory')
     virtCtlFactory = mock.MagicMock(name='virtCtlFactory')
     vmList = []
     ownVMs = []
+    root = Path('/tool/benchmark-runner')
 
     created = MUT.VMcreateByBR(
         SimpleNamespace(),
@@ -305,7 +271,12 @@ def test_VMcreateByBR_SingleVMhappyPathUsesGeneratedIdentityKey(
         ),
         ocCLI=ocFactory,
         virtCtlCLI=virtCtlFactory,
-        brCfg=NamedDict(workloadName='windows', workloadKind='vm'),
+        brCfg=NamedDict(
+            workloadName='windows',
+            workloadKind='vm',
+            rootPath=root,
+            python='/tool/python',
+        ),
         cliCfg=NamedDict(ocCfg={'context': 'oc-context'}),
         gstCfg=NamedDict(usrCrd=NamedDict(sshUsr='unit-user')),
     )
@@ -319,17 +290,20 @@ def test_VMcreateByBR_SingleVMhappyPathUsesGeneratedIdentityKey(
             'uid-one',
         ),
     ])
-    environment = runner.modules[
-        'benchmark_runner.main.environment_variables'
-    ].environment_variables.environment_variables_dict
-    assert (environment['workload'] == 'windows_vm')
-    assert (environment['run_type'] == 'test_ci')
-    assert (environment['namespace'] == 'default')
-    assert not environment['delete_all']
-    assert (environment['scale'] == '')
-    assert (environment['scale_nodes'] == '')
-    assert (environment['uuid'] == str(MUT.uuid4.return_value))
-    assert (environment['trunc_uuid'] == '12345678')
+    runInVenv.assert_called_once()
+    (callRoot, callArgv) = runInVenv.call_args.args
+    assert (callRoot == root)
+    assert (callArgv == MUT._BR__MAIN_ARGV)
+    assert (runInVenv.call_args.kwargs['python'] == '/tool/python')
+    envVars = runInVenv.call_args.kwargs['envVars']
+    assert (envVars['WORKLOAD'] == 'windows_vm')
+    assert (envVars['RUN_TYPE'] == 'test_ci')
+    assert (envVars['NAMESPACE'] == 'default')
+    assert (envVars['DELETE_ALL'] == 'False')
+    assert (envVars['SCALE'] == '')
+    assert (envVars['SCALE_NODES'] == '')
+    assert (envVars['UUID'] == str(MUT.uuid4.return_value))
+    assert ('TRUNC_UUID' not in envVars)
     ocFactory.assert_called_once_with(ns='default', context='oc-context')
     virtCtlFactory.assert_called_once_with(ns='default')
     MUT.VM.assert_called_once_with(
@@ -338,14 +312,8 @@ def test_VMcreateByBR_SingleVMhappyPathUsesGeneratedIdentityKey(
         oc=ocFactory.return_value,
         virtCtl=virtCtlFactory.return_value,
         sshUsr='unit-user',
-        sshKey='/artifacts/ssh/vm_key',
+        sshKey=str(Path(envVars['RUN_ARTIFACTS_PATH'], 'ssh', 'vm_key')),
     )
-
-    runner.brMain.assert_called_once_with()
-    runner.temporaryEnvironment.assert_called_once_with()
-    temporaryEnvironment = runner.temporaryEnvironment.return_value
-    temporaryEnvironment.__enter__.assert_called_once_with()
-    temporaryEnvironment.__exit__.assert_called_once_with(None, None, None)
 
 
 def test_VMcreateByBR_ScalePathNamesVMsAndUsesFallbackKey(
@@ -366,8 +334,7 @@ def test_VMcreateByBR_ScalePathNamesVMsAndUsesFallbackKey(
         (True, 'uid-0', ''),
         (True, 'uid-1', ''),
     ]
-    runner = BenchmarkRunnerModules({'run_artifacts_path': ''})
-    PatchModules(monkeypatch, runner)
+    runInVenv = PatchRunInVenv(monkeypatch)
     ocZero = mock.MagicMock(name='ocZero')
     ocOne = mock.MagicMock(name='ocOne')
     ocFactory = mock.MagicMock(side_effect=[ocZero, ocOne])
@@ -383,7 +350,7 @@ def test_VMcreateByBR_ScalePathNamesVMsAndUsesFallbackKey(
         ),
         ocCLI=ocFactory,
         virtCtlCLI=virtCtlFactory,
-        brCfg=NamedDict(workloadName='windows_scale'),
+        brCfg=NamedDict(workloadName='windows_scale', rootPath=Path('/br')),
         count=2,
     )
 
@@ -393,11 +360,10 @@ def test_VMcreateByBR_ScalePathNamesVMsAndUsesFallbackKey(
         (ocZero, 'VirtualMachine/windows-scale-vm-deadbeef-0', 'uid-0'),
         (ocOne, 'VirtualMachine/windows-scale-vm-deadbeef-1', 'uid-1'),
     ])
-    environment = runner.modules[
-        'benchmark_runner.main.environment_variables'
-    ].environment_variables.environment_variables_dict
-    assert (environment['scale'] == '2')
-    assert (environment['scale_nodes'] == "['worker-a']")
+    envVars = runInVenv.call_args.kwargs['envVars']
+    assert (envVars['SCALE'] == '2')
+    assert (envVars['SCALE_NODES'] == "['worker-a']")
+    assert (envVars['RUN_ARTIFACTS_PATH'] == '/tmp/run')
     MUT.tempfile.mkdtemp.assert_called_once_with()
     assert ([item.kwargs['name'] for item in MUT.VM.call_args_list] == [
         'windows-scale-vm-deadbeef-0',
@@ -424,9 +390,8 @@ def test_VMcreateByBR_NestedOverridesDoNotMutateDefaults(
         (True, '', ''),
         (True, 'default-uid', ''),
     ]
-    runner = BenchmarkRunnerModules({'run_artifacts_path': '/tmp'})
-    PatchModules(monkeypatch, runner)
-    defaultFxtCfg = json.loads(json.dumps(MUT._DEF__FXT_CFG))
+    PatchRunInVenv(monkeypatch)
+    defaultFxtCfg = json.loads(json.dumps(MUT._DEF__FXT_CFG, default=str))
     defaultNestedValues = (
         dict(MUT._DEF__FXT_CFG.cliCfg.ocCfg),
         dict(MUT._DEF__FXT_CFG.cliCfg.vcCfg),
@@ -459,7 +424,8 @@ def test_VMcreateByBR_NestedOverridesDoNotMutateDefaults(
         virtCtlCLI=virtCtlFactory,
     )
 
-    assert (json.loads(json.dumps(MUT._DEF__FXT_CFG)) == defaultFxtCfg)
+    assert (json.loads(json.dumps(MUT._DEF__FXT_CFG, default=str)) ==
+            defaultFxtCfg)
     assert ((
         dict(MUT._DEF__FXT_CFG.cliCfg.ocCfg),
         dict(MUT._DEF__FXT_CFG.cliCfg.vcCfg),
@@ -493,8 +459,7 @@ def test_VMcreateByBR_PreflightLookupFailureRaisesWithoutTracking(
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     MUT.uuid4.return_value = 'abcd-rest'
     OCcli.GetResUID.return_value = (False, '', 'lookup error')
-    runner = BenchmarkRunnerModules({'run_artifacts_path': '/tmp'})
-    PatchModules(monkeypatch, runner)
+    runInVenv = PatchRunInVenv(monkeypatch)
     vmList = []
     ownVMs = []
 
@@ -511,6 +476,7 @@ def test_VMcreateByBR_PreflightLookupFailureRaisesWithoutTracking(
 
     assert (vmList == [])
     assert (ownVMs == [])
+    runInVenv.assert_not_called()
 
 
 def test_VMcreateByBR_PreflightExistingVMIsRefused(
@@ -521,8 +487,7 @@ def test_VMcreateByBR_PreflightExistingVMIsRefused(
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     MUT.uuid4.return_value = 'abcd-rest'
     OCcli.GetResUID.return_value = (True, 'existing-uid', '')
-    runner = BenchmarkRunnerModules({'run_artifacts_path': '/tmp'})
-    PatchModules(monkeypatch, runner)
+    runInVenv = PatchRunInVenv(monkeypatch)
 
     with pytest.raises(RuntimeError, match='already exists'):
         MUT.VMcreateByBR(
@@ -534,6 +499,8 @@ def test_VMcreateByBR_PreflightExistingVMIsRefused(
             ocCLI=mock.MagicMock(),
             virtCtlCLI=mock.MagicMock(),
         )
+
+    runInVenv.assert_not_called()
 
 
 def test_VMcreateByBR_RunnerFailurePreservesPrimaryErrorDuringReconciliation(
@@ -552,10 +519,9 @@ def test_VMcreateByBR_RunnerFailurePreservesPrimaryErrorDuringReconciliation(
         (True, '', ''),
         RuntimeError('lookup exploded'),
     ]
-    runner = BenchmarkRunnerModules({'run_artifacts_path': '/tmp'})
     primary = ValueError('runner failed')
-    runner.brMain.side_effect = primary
-    PatchModules(monkeypatch, runner)
+    runInVenv = PatchRunInVenv(monkeypatch)
+    runInVenv.side_effect = primary
 
     with caplog.at_level('ERROR'), pytest.raises(ValueError) as raised:
         MUT.VMcreateByBR(
@@ -570,17 +536,6 @@ def test_VMcreateByBR_RunnerFailurePreservesPrimaryErrorDuringReconciliation(
         )
 
     assert (raised.value is primary)
-    runner.temporaryEnvironment.assert_called_once_with()
-    temporaryEnvironment = runner.temporaryEnvironment.return_value
-    temporaryEnvironment.__enter__.assert_called_once_with()
-    temporaryEnvironment.__exit__.assert_called_once()
-    (excType, excValue, excTraceback) = (
-        temporaryEnvironment.__exit__.call_args.args
-    )
-    assert (excType is ValueError)
-    assert (excValue is primary)
-    assert (excTraceback is not None)
-    assert (excTraceback.tb_frame.f_code.co_name == 'VMcreateByBR')
     assert ('Preserving benchmark-runner failure' in caplog.text)
 
 
@@ -595,8 +550,7 @@ def test_VMcreateByBR_ReconciliationLookupFailureRaisesWithoutRunnerError(
         (True, '', ''),
         (False, '', 'lookup failed'),
     ]
-    runner = BenchmarkRunnerModules({'run_artifacts_path': '/tmp'})
-    PatchModules(monkeypatch, runner)
+    PatchRunInVenv(monkeypatch)
 
     with pytest.raises(RuntimeError, match='reconcile'):
         MUT.VMcreateByBR(
@@ -618,8 +572,7 @@ def test_VMcreateByBR_ReconciliationMissingVMRaisesWithoutRunnerError(
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     MUT.uuid4.return_value = 'abcd-rest'
     OCcli.GetResUID.side_effect = [(True, '', ''), (True, '', '')]
-    runner = BenchmarkRunnerModules({'run_artifacts_path': '/tmp'})
-    PatchModules(monkeypatch, runner)
+    PatchRunInVenv(monkeypatch)
 
     with pytest.raises(RuntimeError, match='did not create expected'):
         MUT.VMcreateByBR(
@@ -661,6 +614,7 @@ def test_FxtVMbyBR_InitialZeroYieldsFrozenEmptyBundleWithoutCleanup(
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     Utils.AutoPatch(monkeypatch, MUT.tempfile, 'mkdtemp')
+    runInVenv = PatchRunInVenv(monkeypatch)
     generator = MUT.FxtVMbyBR.__wrapped__(
         SimpleNamespace(param={'count': 0}),
         mock.MagicMock(),
@@ -680,6 +634,7 @@ def test_FxtVMbyBR_InitialZeroYieldsFrozenEmptyBundleWithoutCleanup(
     OCcli.GetResUID.assert_not_called()
     MUT.uuid4.assert_not_called()
     MUT.tempfile.mkdtemp.assert_not_called()
+    runInVenv.assert_not_called()
 
 
 def test_FxtVMbyBR_InitialSuccessUsesSelectedConfigAndCleansOnClose(
@@ -697,8 +652,7 @@ def test_FxtVMbyBR_InitialSuccessUsesSelectedConfigAndCleansOnClose(
     ]
     vm = mock.MagicMock(name='initialVM')
     MUT.VM.return_value = vm
-    runner = BenchmarkRunnerModules({'run_artifacts_path': '/tmp'})
-    PatchModules(monkeypatch, runner)
+    PatchRunInVenv(monkeypatch)
     oc = mock.MagicMock(name='initialOC')
     ocFactory = mock.MagicMock(return_value=oc)
     virtCtlFactory = mock.MagicMock()
@@ -755,8 +709,7 @@ def test_FxtVMbyBR_PerCallReturnsAreAggregatedAcrossBatches(
     vmTwo = mock.MagicMock(name='vmTwo')
     vmThree = mock.MagicMock(name='vmThree')
     MUT.VM.side_effect = [vmOne, vmTwo, vmThree]
-    runner = BenchmarkRunnerModules({'run_artifacts_path': '/tmp'})
-    PatchModules(monkeypatch, runner)
+    runInVenv = PatchRunInVenv(monkeypatch)
     ocOne = mock.MagicMock(name='ocOne')
     ocTwo = mock.MagicMock(name='ocTwo')
     ocThree = mock.MagicMock(name='ocThree')
@@ -778,7 +731,7 @@ def test_FxtVMbyBR_PerCallReturnsAreAggregatedAcrossBatches(
     assert (firstBatch == [vmOne])
     assert (secondBatch == [vmTwo, vmThree])
     assert (bundle.vmList == [vmOne, vmTwo, vmThree])
-    assert (runner.brMain.call_count == 2)
+    assert (runInVenv.call_count == 2)
     generator.close()
     MUT.VM.CleanUpVMs.assert_called_once_with(
         bundle.vmList,
@@ -803,8 +756,7 @@ def test_FxtVMbyBR_VMcreateAllowsCLIOverrides(
         (True, '', ''),
         (True, 'selected-uid', ''),
     ]
-    runner = BenchmarkRunnerModules({'run_artifacts_path': '/tmp'})
-    PatchModules(monkeypatch, runner)
+    PatchRunInVenv(monkeypatch)
     defaultOC = mock.MagicMock()
     defaultVirtCtl = mock.MagicMock()
     selectedOC = mock.MagicMock()
@@ -890,8 +842,7 @@ def test_FxtVMbyBR_PreyieldPartialFailureCleansCreatedVMs(
     ]
     vmZero = mock.MagicMock(name='vmZero')
     MUT.VM.side_effect = [vmZero, RuntimeError('wrapper failed')]
-    runner = BenchmarkRunnerModules({'run_artifacts_path': '/tmp'})
-    PatchModules(monkeypatch, runner)
+    PatchRunInVenv(monkeypatch)
     ocZero = mock.MagicMock(name='ocZero')
     ocOne = mock.MagicMock(name='ocOne')
     generator = MUT.FxtVMbyBR.__wrapped__(
@@ -930,8 +881,7 @@ def test_FxtVMbyBR_LaterPartialFailureCleansAggregateOnClose(
     vmZero = mock.MagicMock(name='vmZero')
     primary = RuntimeError('wrapper failed')
     MUT.VM.side_effect = [vmZero, primary]
-    runner = BenchmarkRunnerModules({'run_artifacts_path': '/tmp'})
-    PatchModules(monkeypatch, runner)
+    PatchRunInVenv(monkeypatch)
     ocZero = mock.MagicMock(name='ocZero')
     ocOne = mock.MagicMock(name='ocOne')
     generator = MUT.FxtVMbyBR.__wrapped__(

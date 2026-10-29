@@ -2,11 +2,12 @@
 Krkn fixture for Chaos scenarios
 
 Dependencies:
-  - Stand-alone packages:
+  - Stand-alone packages (each in its own venv under vendor/ or overrides):
     - https://github.com/krkn-chaos/krkn
     - https://github.com/krkn-chaos/krkn-hub
-  - Python modules:
-    - https://github.com/krkn-chaos/krkn-lib
+
+`run_kraken.py` executes inside the krkn tool venv so its dependency pins never
+share the PyTest process environment.
 '''
 from collections.abc import Callable, Generator
 import dataclasses
@@ -19,8 +20,9 @@ import pytest
 
 from fixtures.libs.CommonConstant import LPQE__DEF__NAMESPACE
 from libs.CustomTypes import NamedDict, TempEnv
-from libs.Utils.DynLoad import ImportFromPath, RunFromPath
+from libs.Utils.DynLoad import ImportFromPath
 from libs.Utils.ShellSourceEnv import BashEnv, GetEnvDelta
+from libs.Utils.VenvTool import RunInVenv
 
 
 logs = logging.getLogger()
@@ -57,9 +59,9 @@ _DEF__FXT_CFG = NamedDict(
                 ),
             )),
         ),
+        python=None,
     ),
     testPars=NamedDict(),
-    ctrImgURL_ExecNode='registry.access.redhat.com/ubi9/ubi'
 )
 
 
@@ -92,18 +94,18 @@ class KrknHub:
         rootPath: Union[str, Path],
         krkn: Union[str, Path],
         kCfg: Union[str, Path],
+        python: Optional[Union[str, Path]] = None,
     ) -> None:
         self.rootPath = Path(rootPath)
-        self.krkn = krkn
+        self.krkn = Path(krkn)
         self.kCfg = kCfg
+        self.python = python
 
     def Run(
         self,
         krknEnvFile: Union[str, Path],
         krknPrepMod: FuncParsKrknHub_Run_krknPrepMod,
-        envVars: dict[str, Any] = None,
-        initGlb: dict[str, Any] = None,
-        runName: str = '__main__',
+        envVars: Optional[dict[str, Any]] = None,
     ) -> None:
         with TempEnv():
             # Sourcing Shell Env. file to update the Env. Variables.
@@ -112,7 +114,7 @@ class KrknHub:
                 (self.rootPath / krknEnvFile),
             )
             for key in delEnv: os.environ.pop(key, None)
-            for (key, val) in updEnv.items() : os.environ[key] = str(val)
+            for (key, val) in updEnv.items(): os.environ[key] = str(val)
 
             # Executing Python module for building `krkn` CLI Arguments.
             if not krknPrepMod.modFuncName.strip():
@@ -145,10 +147,19 @@ class KrknHub:
                     f'`{krknPrepMod.modPath}` must produce `list[str]`.'
                 )
 
-            return RunFromPath(
-                self.krkn, krknArgs,
-                {'KUBECONFIG': self.kCfg, **(envVars or {})},
-                initGlb, runName,
+            runEnv: dict[str, Any] = {
+                'KUBECONFIG': str(self.kCfg),
+                **(envVars or {}),
+            }
+            krknRoot = (
+                self.krkn.parent if (self.krkn.suffix == '.py') else self.krkn
+            )
+            RunInVenv(
+                krknRoot,
+                [str(self.krkn), *krknArgs],
+                python=self.python,
+                envVars=runEnv,
+                cwd=krknRoot,
             )
 
 
@@ -159,7 +170,7 @@ def FxtKrkn(
     fxtVirtCtlCLI: Callable[..., Any],
 ) -> Generator[FxtObjKrkn, None, None]:
     '''
-    Provide a `krkn-lib` client and scenario parameters to a test.
+    Provide a Krkn Hub runner and scenario parameters to a test.
 
     Configure via indirect parametrize with `dict`:
         @pytest.mark.parametrize(
@@ -188,11 +199,11 @@ def FxtKrkn(
                 Root dir. of vendor packages:
                   - krkn:       Location where `krkn` is installed.
                   - krknHub:    Location where `krkn-hub` is installed.
+              - python:
+                Optional explicit interpreter for the krkn tool venv;
+                default resolves `<krkn>/.venv/bin/python`.
           - testPars:
             Parameter to be passed to test.
-          - ctrImgURL_ExecNode:
-            Container image URL for host-side execution
-            (default: `'registry.access.redhat.com/ubi9/ubi'`).
 
     :yield:
         A `FxtObjKrkn` where:
@@ -208,14 +219,20 @@ def FxtKrkn(
     fxtCfg = _DEF__FXT_CFG | NamedDict(**getattr(request, 'param', {}))
 
     logs.info(
-        f'Initializing `krkn-lib` client with `KUBECONFIG`: {fxtCfg.kCfg}'
+        f'Initializing Krkn Hub runner with `KUBECONFIG`: {fxtCfg.kCfg}'
     )
 
+    krknRoot = Path(fxtCfg.krknPars.rootPath.krkn)
+    runScript = (
+        krknRoot if krknRoot.name.endswith('.py')
+        else (krknRoot / 'run_kraken.py')
+    )
     yield FxtObjKrkn(
         krknHub=KrknHub(
             fxtCfg.krknPars.rootPath.krknHub,
-            (fxtCfg.krknPars.rootPath.krkn / 'run_krkn.py'),
+            runScript,
             fxtCfg.kCfg,
+            python=fxtCfg.krknPars.python,
         ),
         krknPars=fxtCfg.krknPars,
         testPars=fxtCfg.testPars,

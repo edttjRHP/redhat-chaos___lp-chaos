@@ -5,8 +5,14 @@ __pycache__/
 
 # Virtual environments
 .venv/
+.venv*/
 venv/
 env/
+vendor/**/.venv/
+# Local tool checkouts / setup-tool-venvs.sh symlinks (keep vendor/.gitkeep)
+vendor/benchmark-runner/
+vendor/krkn
+vendor/krknHub
 
 # pytest / coverage
 .pytest_cache/

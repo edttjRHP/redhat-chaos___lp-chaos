@@ -1,41 +1,47 @@
-# The `krkn-lib` Integration
+# The Krkn / krkn-hub Integration
 
-This project uses [`krkn-lib`](https://github.com/krkn-chaos/krkn-lib) for cluster-level operations in OpenShift
-Virtualization resiliency scenarios. PyTest supplies scenario configuration and lifecycle management, krkn-lib works
-with pods and nodes, and `oc` supplies the VM and VMI state needed for OpenShift Virtualization assertions.
+This project uses [`krkn`](https://github.com/krkn-chaos/krkn) with scenario wrappers from
+[`krkn-hub`](https://github.com/krkn-chaos/krkn-hub) for cluster-level Chaos in OpenShift Virtualization resiliency
+scenarios. PyTest supplies scenario configuration and lifecycle management; krkn runs inside its **own virtualenv** via
+subprocess so its dependency pins never share the PyTest `.venv`.
 
 
 ## What the integration provides
 
-For each selected chaos scenario, the framework creates a krkn-lib client from the active kubeconfig and combines it
-with OpenShift and virtualization command access. A test can then observe or disrupt pods, inspect ready nodes, run a
-controlled command on a VM's worker node, and compare those results with VM or VMI state.
+The `fxtKrkn` fixture yields a frozen `FxtObjKrkn` with a `KrknHub` runner, scenario `krknPars` / `testPars`, and
+OpenShift / virtualization CLI access. `KrknHub.Run` sources a hub `env.sh`, loads a small prep module that returns
+`list[str]` CLI arguments, then executes `run_kraken.py` with the krkn tool venv interpreter and `KUBECONFIG`.
 
-The current suite contains two examples:
-- A disruptive recovery scenario deletes the launcher pod for an existing VM and waits for a different launcher pod and
-  the VMI to return to a running state.
-- A non-destructive host-access scenario identifies the VM's worker node, confirms that the node is ready, reads its
-  kernel version, and logs selected host-kernel messages.
-
-The first example evaluates virtualization recovery after pod disruption. The second establishes observation access for
-later work. Neither example injects a Windows bugcheck or validates a crash dump.
-
-
-## Operational boundary
-
-The krkn-lib examples expect a pre-existing VM selected by the scenario; they do not provision that VM as part of the
-same lifecycle. They also create temporary cluster resources when performing node-level access. Run them only with an
-appropriate kubeconfig on an authorized, disposable test environment.
-
-To verify selection without touching a cluster:
+Example scenarios under `test--suites/ts--example/test_Krkn.py` are currently placeholders while hub wiring for the
+new design lands. Collect them with:
 ```bash
 .venv/bin/pytest -m krkn --collect-only
 ```
 
-Running without `--collect-only` can delete a launcher pod and create a privileged temporary pod on a worker node.
+
+## Tool layout
+
+Defaults under `src/PyTest/vendor/`:
+  - `vendor/krkn` — krkn checkout + `.venv` (created by `scripts/setup-tool-venvs.sh`)
+  - `vendor/krknHub` — krkn-hub checkout (no dedicated venv)
+
+Overrides:
+  - `IENG_PYTEST____FXT__KRKN____DEF_FXT_CFG__ROOTPATH_KRKN`
+  - `IENG_PYTEST____FXT__KRKN____DEF_FXT_CFG__ROOTPATH_KRKNHUB`
+  - fixture `krknPars.python` for an explicit interpreter
+
+```bash
+cd src/PyTest
+# Optional: export KRKN_SRC=/path/to/krkn
+./scripts/setup-tool-venvs.sh
+# Clone https://github.com/krkn-chaos/krkn-hub into vendor/krknHub when needed.
+```
 
 
-## Current boundary
+## Operational boundary
+
+Chaos scenarios can delete pods or create privileged temporary pods on worker nodes. Run them only with an appropriate
+kubeconfig on an authorized, disposable test environment.
 
 The integration does not currently provide implemented BSOD fault injection, guest crash detection, evidence
 collection, or dump analysis. Proposed pressure and fault scenarios remain roadmap items and must not be presented as

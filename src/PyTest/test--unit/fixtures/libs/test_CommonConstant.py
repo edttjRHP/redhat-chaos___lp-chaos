@@ -1,5 +1,5 @@
-from fixtures.libs.CommonConstant import LPQE__DEF__NAMESPACE
+import fixtures.libs.CommonConstant as MUT
 
 
 def test_LPQE__DEF__NAMESPACE_DefaultNamespace() -> None:
-    assert LPQE__DEF__NAMESPACE == 'default'
+    assert (MUT.LPQE__DEF__NAMESPACE == 'default')

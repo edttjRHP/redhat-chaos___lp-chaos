@@ -9,6 +9,7 @@ import pytest
 
 import fixtures.BenchmarkRunner as MUT
 from libs.CustomTypes import NamedDict
+from libs.OpenShift.OCP.CLI.OC import OCcli
 import Utils
 
 
@@ -36,13 +37,16 @@ class BenchmarkRunnerModules:
         temporaryModule = types.ModuleType(
             'benchmark_runner.main.temporary_environment_variables',
         )
-        temporaryModule.TemporaryEnvironmentVariables = self.temporaryEnvironment
+        temporaryModule.TemporaryEnvironmentVariables = (
+            self.temporaryEnvironment
+        )
         self.modules = {
             'benchmark_runner': package,
             'benchmark_runner.main': mainPackage,
             'benchmark_runner.main.environment_variables': environmentModule,
             'benchmark_runner.main.main': mainModule,
-            'benchmark_runner.main.temporary_environment_variables': temporaryModule,
+            'benchmark_runner.main.temporary_environment_variables':
+                temporaryModule,
         }
 
 
@@ -50,13 +54,163 @@ def PatchModules(
     monkeypatch: pytest.MonkeyPatch,
     runner: BenchmarkRunnerModules,
 ) -> None:
-    for name, module in runner.modules.items():
+    for (name, module) in runner.modules.items():
         monkeypatch.setitem(sys.modules, name, module)
+
+
+def test__DEF__FXT_CFG_UsesNestedWorkloadConfiguration() -> None:
+    cfg = MUT._DEF__FXT_CFG
+    assert (cfg.brCfg == NamedDict(workloadName='windows', workloadKind='vm'))
+    assert ('workloadName' not in cfg)
+    assert ('workloadKind' not in cfg)
+    merged = cfg | NamedDict(brCfg=NamedDict(workloadKind='custom'))
+    assert (merged.brCfg.workloadName == 'windows')
+    assert (merged.brCfg.workloadKind == 'custom')
+    assert (cfg.brCfg.workloadKind == 'vm')
+
+
+def test_FuncParsVMcreateByBR_RequiresConfigAndKeepsMutableLists() -> None:
+    with pytest.raises(TypeError, match='fxtCfgObj'):
+        MUT.FuncParsVMcreateByBR()
+
+    config = MUT._DEF__FXT_CFG | NamedDict(count=0)
+    first = MUT.FuncParsVMcreateByBR(fxtCfgObj=config)
+    second = MUT.FuncParsVMcreateByBR(fxtCfgObj=config)
+    assert (first.fxtCfgObj is config)
+    assert (first.vmList is not second.vmList)
+    assert (first.ownVMs is not second.ownVMs)
+    assert (first.vmList is not first.ownVMs)
+    for fld in ('fxtCfgObj', 'vmList', 'ownVMs'):
+        with pytest.raises(FrozenInstanceError):
+            setattr(first, fld, None)
+
+    vm = object()
+    ownership = (object(), 'vm-name', 'uid')
+    first.vmList.append(vm)
+    first.ownVMs.append(ownership)
+    assert (first.vmList == [vm])
+    assert (first.ownVMs == [ownership])
+    assert (second.vmList == [])
+    assert (second.ownVMs == [])
+
+
+def test_FxtVMbyBR_RetainsSetupAndIsolatesTemporaryOverrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
+    Utils.AutoPatch(monkeypatch, MUT, 'VM')
+    Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
+    Utils.AutoPatch(monkeypatch, MUT.Path, 'is_file')
+    MUT.Path.is_file.return_value = False
+    MUT.uuid4.side_effect = ['first-rest', 'second-rest', 'third-rest']
+    OCcli.GetResUID.side_effect = [
+        (True, '', ''), (True, 'uid-one', ''),
+        (True, '', ''), (True, 'uid-two', ''),
+        (True, '', ''), (True, 'uid-three', ''),
+    ]
+    runner = BenchmarkRunnerModules({'run_artifacts_path': '/tmp'})
+    PatchModules(monkeypatch, runner)
+    setup = {
+        'count': 0,
+        'ns': 'setup-ns',
+        'brCfg': NamedDict(workloadName='setup'),
+        'cliCfg': NamedDict(
+            ocCfg={'context': 'setup-context'},
+            vcCfg={'kubeconfig': '/setup-config'},
+        ),
+        'gstCfg': NamedDict(usrCrd=NamedDict(sshUsr='setup-user')),
+    }
+    overrides = {
+        'count': 1,
+        'ns': 'call-ns',
+        'cliCfg': NamedDict(ocCfg={'context': 'call-context'}),
+        'gstCfg': NamedDict(usrCrd=NamedDict(sshUsr='call-user')),
+    }
+    (setupBefore, overridesBefore, defaultsBefore) = json.loads(json.dumps((
+        setup, overrides, MUT._DEF__FXT_CFG,
+    )))
+    ocFactory = mock.MagicMock()
+    virtCtlFactory = mock.MagicMock()
+    request = SimpleNamespace(param=setup)
+    generator = MUT.FxtVMbyBR.__wrapped__(
+        request, ocFactory, virtCtlFactory,
+    )
+    bundle = next(generator)
+    fPars = bundle.vmCreate.args[1]
+    configBefore = json.loads(json.dumps(fPars.fxtCfgObj))
+    assert (bundle.vmList is fPars.vmList)
+    assert (bundle.vmCreate() == [])
+    request.param = {'count': -1, 'ns': 'ignored-later-request'}
+
+    first = bundle.vmCreate(**overrides)
+    assert (bundle.vmCreate() == [])
+    second = bundle.vmCreate(count=1)
+    third = bundle.vmCreate(count=1)
+
+    assert (bundle.vmList == (first + second + third))
+    assert (ocFactory.call_args_list == [
+        mock.call(ns='call-ns', context='call-context'),
+        mock.call(ns='setup-ns', context='setup-context'),
+        mock.call(ns='setup-ns', context='setup-context'),
+    ])
+    assert (virtCtlFactory.call_args_list == [
+        mock.call(ns='call-ns', kubeconfig='/setup-config'),
+        mock.call(ns='setup-ns', kubeconfig='/setup-config'),
+        mock.call(ns='setup-ns', kubeconfig='/setup-config'),
+    ])
+    assert ([call.kwargs['sshUsr'] for call in MUT.VM.call_args_list] == [
+        'call-user', 'setup-user', 'setup-user',
+    ])
+    assert ([call.kwargs['name'] for call in MUT.VM.call_args_list] == [
+        'setup-vm-first', 'setup-vm-second', 'setup-vm-third',
+    ])
+    assert (fPars.fxtCfgObj == configBefore)
+    assert (setup == setupBefore)
+    assert (overrides == overridesBefore)
+    assert (MUT._DEF__FXT_CFG == defaultsBefore)
+    generator.close()
+    (cleanupVMs, cleanupOwnership) = MUT.VM.CleanUpVMs.call_args.args
+    assert (cleanupVMs is bundle.vmList)
+    assert (cleanupOwnership is fPars.ownVMs)
+    assert ([record[2] for record in cleanupOwnership] == [
+        'uid-one', 'uid-two', 'uid-three',
+    ])
+
+
+@pytest.mark.parametrize('hasRequestParam', [False, True])
+def test_FxtVMbyBR_DefaultSetupIsRetainedAcrossCalls(
+    monkeypatch: pytest.MonkeyPatch,
+    hasRequestParam: bool,
+) -> None:
+    Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
+    Utils.AutoPatch(monkeypatch, MUT, 'VM')
+    Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
+    Utils.AutoPatch(monkeypatch, MUT.Path, 'is_file')
+    MUT.Path.is_file.return_value = False
+    MUT.uuid4.side_effect = ['initial-rest', 'later-rest']
+    OCcli.GetResUID.side_effect = [
+        (True, '', ''), (True, 'initial-uid', ''),
+        (True, '', ''), (True, 'later-uid', ''),
+    ]
+    runner = BenchmarkRunnerModules({'run_artifacts_path': '/tmp'})
+    PatchModules(monkeypatch, runner)
+    request = (
+        SimpleNamespace(param={}) if hasRequestParam else SimpleNamespace()
+    )
+    generator = MUT.FxtVMbyBR.__wrapped__(
+        request, mock.MagicMock(), mock.MagicMock(),
+    )
+    bundle = next(generator)
+    assert (len(bundle.vmCreate()) == 1)
+    assert (len(bundle.vmList) == 2)
+    assert (runner.brMain.call_count == 2)
+    generator.close()
 
 
 def test_VMcreateByBR_NegativeCountIsRejectedBeforeImportingRunner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     Utils.AutoPatch(monkeypatch, MUT.tempfile, 'mkdtemp')
@@ -68,18 +222,20 @@ def test_VMcreateByBR_NegativeCountIsRejectedBeforeImportingRunner(
     with pytest.raises(ValueError, match='must not be negative'):
         MUT.VMcreateByBR(
             SimpleNamespace(),
-            vmList,
-            ownVMs,
+            MUT.FuncParsVMcreateByBR(
+                fxtCfgObj=MUT._DEF__FXT_CFG,
+                vmList=vmList, ownVMs=ownVMs,
+            ),
             ocCLI=ocFactory,
             virtCtlCLI=virtCtlFactory,
             count=-1,
         )
 
-    assert vmList == []
-    assert ownVMs == []
+    assert (vmList == [])
+    assert (ownVMs == [])
     ocFactory.assert_not_called()
     virtCtlFactory.assert_not_called()
-    MUT.VM.GetVMuid.assert_not_called()
+    OCcli.GetResUID.assert_not_called()
     MUT.uuid4.assert_not_called()
     MUT.tempfile.mkdtemp.assert_not_called()
 
@@ -87,6 +243,7 @@ def test_VMcreateByBR_NegativeCountIsRejectedBeforeImportingRunner(
 def test_VMcreateByBR_ZeroCountReturnsEmptyWithoutRunner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     Utils.AutoPatch(monkeypatch, MUT.tempfile, 'mkdtemp')
@@ -99,19 +256,21 @@ def test_VMcreateByBR_ZeroCountReturnsEmptyWithoutRunner(
 
     result = MUT.VMcreateByBR(
         SimpleNamespace(),
-        vmList,
-        ownVMs,
+        MUT.FuncParsVMcreateByBR(
+            fxtCfgObj=MUT._DEF__FXT_CFG,
+            vmList=vmList, ownVMs=ownVMs,
+        ),
         ocCLI=ocFactory,
         virtCtlCLI=virtCtlFactory,
         count=0,
     )
 
-    assert result == []
-    assert vmList == []
-    assert ownVMs == []
+    assert (result == [])
+    assert (vmList == [])
+    assert (ownVMs == [])
     ocFactory.assert_not_called()
     virtCtlFactory.assert_not_called()
-    MUT.VM.GetVMuid.assert_not_called()
+    OCcli.GetResUID.assert_not_called()
     MUT.uuid4.assert_not_called()
     MUT.tempfile.mkdtemp.assert_not_called()
     runner.brMain.assert_not_called()
@@ -121,12 +280,13 @@ def test_VMcreateByBR_ZeroCountReturnsEmptyWithoutRunner(
 def test_VMcreateByBR_SingleVMhappyPathUsesGeneratedIdentityKey(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     Utils.AutoPatch(monkeypatch, MUT.Path, 'is_file')
     MUT.uuid4.return_value = '12345678-abcd-0000-0000-000000000000'
     MUT.Path.is_file.return_value = True
-    MUT.VM.GetVMuid.side_effect = [
+    OCcli.GetResUID.side_effect = [
         (True, '', ''),
         (True, 'uid-one', ''),
     ]
@@ -134,38 +294,42 @@ def test_VMcreateByBR_SingleVMhappyPathUsesGeneratedIdentityKey(
     PatchModules(monkeypatch, runner)
     ocFactory = mock.MagicMock(name='ocFactory')
     virtCtlFactory = mock.MagicMock(name='virtCtlFactory')
-    request = SimpleNamespace()
     vmList = []
     ownVMs = []
 
     created = MUT.VMcreateByBR(
-        request,
-        vmList,
-        ownVMs,
+        SimpleNamespace(),
+        MUT.FuncParsVMcreateByBR(
+            fxtCfgObj=MUT._DEF__FXT_CFG,
+            vmList=vmList, ownVMs=ownVMs,
+        ),
         ocCLI=ocFactory,
         virtCtlCLI=virtCtlFactory,
-        workloadName='windows',
-        workloadKind='vm',
+        brCfg=NamedDict(workloadName='windows', workloadKind='vm'),
         cliCfg=NamedDict(ocCfg={'context': 'oc-context'}),
         gstCfg=NamedDict(usrCrd=NamedDict(sshUsr='unit-user')),
     )
 
-    assert created == [MUT.VM.return_value]
-    assert vmList == created
-    assert ownVMs == [
-        (ocFactory.return_value, 'windows-vm-12345678', 'uid-one'),
-    ]
+    assert (created == [MUT.VM.return_value])
+    assert (vmList == created)
+    assert (ownVMs == [
+        (
+            ocFactory.return_value,
+            'VirtualMachine/windows-vm-12345678',
+            'uid-one',
+        ),
+    ])
     environment = runner.modules[
         'benchmark_runner.main.environment_variables'
     ].environment_variables.environment_variables_dict
-    assert environment['workload'] == 'windows_vm'
-    assert environment['run_type'] == 'test_ci'
-    assert environment['namespace'] == 'default'
+    assert (environment['workload'] == 'windows_vm')
+    assert (environment['run_type'] == 'test_ci')
+    assert (environment['namespace'] == 'default')
     assert not environment['delete_all']
-    assert environment['scale'] == ''
-    assert environment['scale_nodes'] == ''
-    assert environment['uuid'] == str(MUT.uuid4.return_value)
-    assert environment['trunc_uuid'] == '12345678'
+    assert (environment['scale'] == '')
+    assert (environment['scale_nodes'] == '')
+    assert (environment['uuid'] == str(MUT.uuid4.return_value))
+    assert (environment['trunc_uuid'] == '12345678')
     ocFactory.assert_called_once_with(ns='default', context='oc-context')
     virtCtlFactory.assert_called_once_with(ns='default')
     MUT.VM.assert_called_once_with(
@@ -187,6 +351,7 @@ def test_VMcreateByBR_SingleVMhappyPathUsesGeneratedIdentityKey(
 def test_VMcreateByBR_ScalePathNamesVMsAndUsesFallbackKey(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     monkeypatch.setenv('WORKER_NODE', 'worker-a')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
@@ -195,7 +360,7 @@ def test_VMcreateByBR_ScalePathNamesVMsAndUsesFallbackKey(
     MUT.uuid4.return_value = 'deadbeef-rest'
     MUT.Path.is_file.return_value = False
     MUT.tempfile.mkdtemp.return_value = '/tmp/run'
-    MUT.VM.GetVMuid.side_effect = [
+    OCcli.GetResUID.side_effect = [
         (True, '', ''),
         (True, '', ''),
         (True, 'uid-0', ''),
@@ -212,45 +377,48 @@ def test_VMcreateByBR_ScalePathNamesVMsAndUsesFallbackKey(
 
     created = MUT.VMcreateByBR(
         SimpleNamespace(),
-        vmList,
-        ownVMs,
+        MUT.FuncParsVMcreateByBR(
+            fxtCfgObj=MUT._DEF__FXT_CFG,
+            vmList=vmList, ownVMs=ownVMs,
+        ),
         ocCLI=ocFactory,
         virtCtlCLI=virtCtlFactory,
+        brCfg=NamedDict(workloadName='windows_scale'),
         count=2,
-        workloadName='windows_scale',
     )
 
-    assert len(created) == 2
-    assert vmList == created
-    assert ownVMs == [
-        (ocZero, 'windows-scale-vm-deadbeef-0', 'uid-0'),
-        (ocOne, 'windows-scale-vm-deadbeef-1', 'uid-1'),
-    ]
+    assert (len(created) == 2)
+    assert (vmList == created)
+    assert (ownVMs == [
+        (ocZero, 'VirtualMachine/windows-scale-vm-deadbeef-0', 'uid-0'),
+        (ocOne, 'VirtualMachine/windows-scale-vm-deadbeef-1', 'uid-1'),
+    ])
     environment = runner.modules[
         'benchmark_runner.main.environment_variables'
     ].environment_variables.environment_variables_dict
-    assert environment['scale'] == '2'
-    assert environment['scale_nodes'] == "['worker-a']"
+    assert (environment['scale'] == '2')
+    assert (environment['scale_nodes'] == "['worker-a']")
     MUT.tempfile.mkdtemp.assert_called_once_with()
-    assert [item.kwargs['name'] for item in MUT.VM.call_args_list] == [
+    assert ([item.kwargs['name'] for item in MUT.VM.call_args_list] == [
         'windows-scale-vm-deadbeef-0',
         'windows-scale-vm-deadbeef-1',
-    ]
+    ])
     assert all(
-        item.kwargs['sshKey'] == '~/.ssh/openshift-qe.pem'
-        for item in MUT.VM.call_args_list
+        (item.kwargs['sshKey'] == '~/.ssh/openshift-qe.pem')
+            for item in MUT.VM.call_args_list
     )
 
 
 def test_VMcreateByBR_NestedOverridesDoNotMutateDefaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     Utils.AutoPatch(monkeypatch, MUT.Path, 'is_file')
     MUT.uuid4.side_effect = ['custom-rest', 'default-rest']
     MUT.Path.is_file.return_value = False
-    MUT.VM.GetVMuid.side_effect = [
+    OCcli.GetResUID.side_effect = [
         (True, '', ''),
         (True, 'custom-uid', ''),
         (True, '', ''),
@@ -269,8 +437,10 @@ def test_VMcreateByBR_NestedOverridesDoNotMutateDefaults(
 
     MUT.VMcreateByBR(
         SimpleNamespace(),
-        [],
-        [],
+        MUT.FuncParsVMcreateByBR(
+            fxtCfgObj=MUT._DEF__FXT_CFG,
+            vmList=[], ownVMs=[],
+        ),
         ocCLI=ocFactory,
         virtCtlCLI=virtCtlFactory,
         cliCfg=NamedDict(
@@ -281,45 +451,48 @@ def test_VMcreateByBR_NestedOverridesDoNotMutateDefaults(
     )
     MUT.VMcreateByBR(
         SimpleNamespace(),
-        [],
-        [],
+        MUT.FuncParsVMcreateByBR(
+            fxtCfgObj=MUT._DEF__FXT_CFG,
+            vmList=[], ownVMs=[],
+        ),
         ocCLI=ocFactory,
         virtCtlCLI=virtCtlFactory,
     )
 
-    assert json.loads(json.dumps(MUT._DEF__FXT_CFG)) == defaultFxtCfg
-    assert (
+    assert (json.loads(json.dumps(MUT._DEF__FXT_CFG)) == defaultFxtCfg)
+    assert ((
         dict(MUT._DEF__FXT_CFG.cliCfg.ocCfg),
         dict(MUT._DEF__FXT_CFG.cliCfg.vcCfg),
         dict(MUT._DEF__FXT_CFG.gstCfg.usrCrd),
-    ) == defaultNestedValues
-    assert ocFactory.call_args_list == [
+    ) == defaultNestedValues)
+    assert (ocFactory.call_args_list == [
         mock.call(ns='default', context='custom-context'),
         mock.call(ns='default'),
-    ]
-    assert virtCtlFactory.call_args_list == [
+    ])
+    assert (virtCtlFactory.call_args_list == [
         mock.call(ns='default', kubeconfig='/custom-config'),
         mock.call(ns='default'),
-    ]
-    assert MUT.VM.call_args_list[0].kwargs['sshUsr'] == 'custom-user'
-    assert MUT.VM.call_args_list[0].kwargs['sshKey'] == (
+    ])
+    assert (MUT.VM.call_args_list[0].kwargs['sshUsr'] == 'custom-user')
+    assert (MUT.VM.call_args_list[0].kwargs['sshKey'] == (
         defaultFxtCfg['gstCfg']['usrCrd']['sshKey']
-    )
-    assert MUT.VM.call_args_list[1].kwargs['sshUsr'] == (
+    ))
+    assert (MUT.VM.call_args_list[1].kwargs['sshUsr'] == (
         defaultFxtCfg['gstCfg']['usrCrd']['sshUsr']
-    )
-    assert MUT.VM.call_args_list[1].kwargs['sshKey'] == (
+    ))
+    assert (MUT.VM.call_args_list[1].kwargs['sshKey'] == (
         defaultFxtCfg['gstCfg']['usrCrd']['sshKey']
-    )
+    ))
 
 
 def test_VMcreateByBR_PreflightLookupFailureRaisesWithoutTracking(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     MUT.uuid4.return_value = 'abcd-rest'
-    MUT.VM.GetVMuid.return_value = (False, '', 'lookup error')
+    OCcli.GetResUID.return_value = (False, '', 'lookup error')
     runner = BenchmarkRunnerModules({'run_artifacts_path': '/tmp'})
     PatchModules(monkeypatch, runner)
     vmList = []
@@ -328,31 +501,36 @@ def test_VMcreateByBR_PreflightLookupFailureRaisesWithoutTracking(
     with pytest.raises(RuntimeError, match='lookup error'):
         MUT.VMcreateByBR(
             SimpleNamespace(),
-            vmList,
-            ownVMs,
+            MUT.FuncParsVMcreateByBR(
+                fxtCfgObj=MUT._DEF__FXT_CFG,
+                vmList=vmList, ownVMs=ownVMs,
+            ),
             ocCLI=mock.MagicMock(),
             virtCtlCLI=mock.MagicMock(),
         )
 
-    assert vmList == []
-    assert ownVMs == []
+    assert (vmList == [])
+    assert (ownVMs == [])
 
 
 def test_VMcreateByBR_PreflightExistingVMIsRefused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     MUT.uuid4.return_value = 'abcd-rest'
-    MUT.VM.GetVMuid.return_value = (True, 'existing-uid', '')
+    OCcli.GetResUID.return_value = (True, 'existing-uid', '')
     runner = BenchmarkRunnerModules({'run_artifacts_path': '/tmp'})
     PatchModules(monkeypatch, runner)
 
     with pytest.raises(RuntimeError, match='already exists'):
         MUT.VMcreateByBR(
             SimpleNamespace(),
-            [],
-            [],
+            MUT.FuncParsVMcreateByBR(
+                fxtCfgObj=MUT._DEF__FXT_CFG,
+                vmList=[], ownVMs=[],
+            ),
             ocCLI=mock.MagicMock(),
             virtCtlCLI=mock.MagicMock(),
         )
@@ -362,10 +540,11 @@ def test_VMcreateByBR_RunnerFailurePreservesPrimaryErrorDuringReconciliation(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     MUT.uuid4.return_value = 'abcd-rest'
-    MUT.VM.GetVMuid.side_effect = [
+    OCcli.GetResUID.side_effect = [
         (True, '', ''),
         (True, '', ''),
         (True, '', ''),
@@ -381,33 +560,38 @@ def test_VMcreateByBR_RunnerFailurePreservesPrimaryErrorDuringReconciliation(
     with caplog.at_level('ERROR'), pytest.raises(ValueError) as raised:
         MUT.VMcreateByBR(
             SimpleNamespace(),
-            [],
-            [],
+            MUT.FuncParsVMcreateByBR(
+                fxtCfgObj=MUT._DEF__FXT_CFG,
+                vmList=[], ownVMs=[],
+            ),
             ocCLI=mock.MagicMock(),
             virtCtlCLI=mock.MagicMock(),
             count=3,
         )
 
-    assert raised.value is primary
+    assert (raised.value is primary)
     runner.temporaryEnvironment.assert_called_once_with()
     temporaryEnvironment = runner.temporaryEnvironment.return_value
     temporaryEnvironment.__enter__.assert_called_once_with()
     temporaryEnvironment.__exit__.assert_called_once()
-    excType, excValue, excTraceback = temporaryEnvironment.__exit__.call_args.args
-    assert excType is ValueError
-    assert excValue is primary
-    assert excTraceback is not None
-    assert excTraceback.tb_frame.f_code.co_name == 'VMcreateByBR'
-    assert 'Preserving benchmark-runner failure' in caplog.text
+    (excType, excValue, excTraceback) = (
+        temporaryEnvironment.__exit__.call_args.args
+    )
+    assert (excType is ValueError)
+    assert (excValue is primary)
+    assert (excTraceback is not None)
+    assert (excTraceback.tb_frame.f_code.co_name == 'VMcreateByBR')
+    assert ('Preserving benchmark-runner failure' in caplog.text)
 
 
 def test_VMcreateByBR_ReconciliationLookupFailureRaisesWithoutRunnerError(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     MUT.uuid4.return_value = 'abcd-rest'
-    MUT.VM.GetVMuid.side_effect = [
+    OCcli.GetResUID.side_effect = [
         (True, '', ''),
         (False, '', 'lookup failed'),
     ]
@@ -417,8 +601,10 @@ def test_VMcreateByBR_ReconciliationLookupFailureRaisesWithoutRunnerError(
     with pytest.raises(RuntimeError, match='reconcile'):
         MUT.VMcreateByBR(
             SimpleNamespace(),
-            [],
-            [],
+            MUT.FuncParsVMcreateByBR(
+                fxtCfgObj=MUT._DEF__FXT_CFG,
+                vmList=[], ownVMs=[],
+            ),
             ocCLI=mock.MagicMock(),
             virtCtlCLI=mock.MagicMock(),
         )
@@ -427,26 +613,29 @@ def test_VMcreateByBR_ReconciliationLookupFailureRaisesWithoutRunnerError(
 def test_VMcreateByBR_ReconciliationMissingVMRaisesWithoutRunnerError(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     MUT.uuid4.return_value = 'abcd-rest'
-    MUT.VM.GetVMuid.side_effect = [(True, '', ''), (True, '', '')]
+    OCcli.GetResUID.side_effect = [(True, '', ''), (True, '', '')]
     runner = BenchmarkRunnerModules({'run_artifacts_path': '/tmp'})
     PatchModules(monkeypatch, runner)
 
     with pytest.raises(RuntimeError, match='did not create expected'):
         MUT.VMcreateByBR(
             SimpleNamespace(),
-            [],
-            [],
+            MUT.FuncParsVMcreateByBR(
+                fxtCfgObj=MUT._DEF__FXT_CFG,
+                vmList=[], ownVMs=[],
+            ),
             ocCLI=mock.MagicMock(),
             virtCtlCLI=mock.MagicMock(),
         )
 
 
 def test_FxtVMbyBR_RegistrationUsesModuleScope() -> None:
-    assert MUT.FxtVMbyBR.name == 'fxtVMbyBR'
-    assert MUT.FxtVMbyBR._fixture_function_marker.scope == 'module'
+    assert (MUT.FxtVMbyBR.name == 'fxtVMbyBR')
+    assert (MUT.FxtVMbyBR._fixture_function_marker.scope == 'module')
 
 
 def test_FxtVMbyBR_InitialNegativeFailsBeforeYieldWithoutCleanup(
@@ -468,6 +657,7 @@ def test_FxtVMbyBR_InitialNegativeFailsBeforeYieldWithoutCleanup(
 def test_FxtVMbyBR_InitialZeroYieldsFrozenEmptyBundleWithoutCleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     Utils.AutoPatch(monkeypatch, MUT.tempfile, 'mkdtemp')
@@ -481,13 +671,13 @@ def test_FxtVMbyBR_InitialZeroYieldsFrozenEmptyBundleWithoutCleanup(
 
     assert isinstance(bundle, MUT.FxtObjVMbyBR)
     assert issubclass(MUT.FxtObjVMbyBR, MUT.FxtObjVM)
-    assert bundle.vmList == []
-    assert bundle.vmCreate(count=0) == []
+    assert (bundle.vmList == [])
+    assert (bundle.vmCreate(count=0) == [])
     with pytest.raises(FrozenInstanceError):
         bundle.vmList = []
     generator.close()
     MUT.VM.CleanUpVMs.assert_not_called()
-    MUT.VM.GetVMuid.assert_not_called()
+    OCcli.GetResUID.assert_not_called()
     MUT.uuid4.assert_not_called()
     MUT.tempfile.mkdtemp.assert_not_called()
 
@@ -495,12 +685,13 @@ def test_FxtVMbyBR_InitialZeroYieldsFrozenEmptyBundleWithoutCleanup(
 def test_FxtVMbyBR_InitialSuccessUsesSelectedConfigAndCleansOnClose(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     Utils.AutoPatch(monkeypatch, MUT.Path, 'is_file')
     MUT.uuid4.return_value = 'initial-rest'
     MUT.Path.is_file.return_value = False
-    MUT.VM.GetVMuid.side_effect = [
+    OCcli.GetResUID.side_effect = [
         (True, '', ''),
         (True, 'initial-uid', ''),
     ]
@@ -513,13 +704,13 @@ def test_FxtVMbyBR_InitialSuccessUsesSelectedConfigAndCleansOnClose(
     virtCtlFactory = mock.MagicMock()
     generator = MUT.FxtVMbyBR.__wrapped__(
         request=SimpleNamespace(param={
+            'brCfg': NamedDict(workloadName='initial'),
             'count': 1,
-            'ns': 'initial-ns',
-            'workloadName': 'initial',
             'cliCfg': NamedDict(
                 ocCfg={'context': 'initial-context'},
                 vcCfg={'kubeconfig': '/initial-config'},
             ),
+            'ns': 'initial-ns',
         }),
         fxtOCcli=ocFactory,
         fxtVirtCtlCLI=virtCtlFactory,
@@ -527,7 +718,7 @@ def test_FxtVMbyBR_InitialSuccessUsesSelectedConfigAndCleansOnClose(
 
     bundle = next(generator)
 
-    assert bundle.vmList == [vm]
+    assert (bundle.vmList == [vm])
     ocFactory.assert_called_once_with(
         ns='initial-ns',
         context='initial-context',
@@ -539,19 +730,20 @@ def test_FxtVMbyBR_InitialSuccessUsesSelectedConfigAndCleansOnClose(
     generator.close()
     MUT.VM.CleanUpVMs.assert_called_once_with(
         bundle.vmList,
-        [(oc, 'initial-vm-initial', 'initial-uid')],
+        [(oc, 'VirtualMachine/initial-vm-initial', 'initial-uid')],
     )
 
 
 def test_FxtVMbyBR_PerCallReturnsAreAggregatedAcrossBatches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     Utils.AutoPatch(monkeypatch, MUT.Path, 'is_file')
     MUT.uuid4.side_effect = ['first-rest', 'second-rest']
     MUT.Path.is_file.return_value = False
-    MUT.VM.GetVMuid.side_effect = [
+    OCcli.GetResUID.side_effect = [
         (True, '', ''),
         (True, 'uid-one', ''),
         (True, '', ''),
@@ -576,20 +768,24 @@ def test_FxtVMbyBR_PerCallReturnsAreAggregatedAcrossBatches(
     )
     bundle = next(generator)
 
-    firstBatch = bundle.vmCreate(count=1, workloadName='first')
-    secondBatch = bundle.vmCreate(count=2, workloadName='second')
+    firstBatch = bundle.vmCreate(
+        brCfg=NamedDict(workloadName='first'), count=1,
+    )
+    secondBatch = bundle.vmCreate(
+        brCfg=NamedDict(workloadName='second'), count=2,
+    )
 
-    assert firstBatch == [vmOne]
-    assert secondBatch == [vmTwo, vmThree]
-    assert bundle.vmList == [vmOne, vmTwo, vmThree]
-    assert runner.brMain.call_count == 2
+    assert (firstBatch == [vmOne])
+    assert (secondBatch == [vmTwo, vmThree])
+    assert (bundle.vmList == [vmOne, vmTwo, vmThree])
+    assert (runner.brMain.call_count == 2)
     generator.close()
     MUT.VM.CleanUpVMs.assert_called_once_with(
         bundle.vmList,
         [
-            (ocOne, 'first-vm-first', 'uid-one'),
-            (ocTwo, 'second-vm-second-0', 'uid-two'),
-            (ocThree, 'second-vm-second-1', 'uid-three'),
+            (ocOne, 'VirtualMachine/first-vm-first', 'uid-one'),
+            (ocTwo, 'VirtualMachine/second-vm-second-0', 'uid-two'),
+            (ocThree, 'VirtualMachine/second-vm-second-1', 'uid-three'),
         ],
     )
 
@@ -597,12 +793,13 @@ def test_FxtVMbyBR_PerCallReturnsAreAggregatedAcrossBatches(
 def test_FxtVMbyBR_VMcreateAllowsCLIOverrides(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     Utils.AutoPatch(monkeypatch, MUT.Path, 'is_file')
     MUT.uuid4.return_value = 'selected-rest'
     MUT.Path.is_file.return_value = False
-    MUT.VM.GetVMuid.side_effect = [
+    OCcli.GetResUID.side_effect = [
         (True, '', ''),
         (True, 'selected-uid', ''),
     ]
@@ -630,7 +827,7 @@ def test_FxtVMbyBR_VMcreateAllowsCLIOverrides(
         virtCtlCLI=selectedVirtCtl,
     )
 
-    assert created == [MUT.VM.return_value]
+    assert (created == [MUT.VM.return_value])
     selectedOC.assert_called_once_with(
         ns='selected-ns',
         context='selected-context',
@@ -644,11 +841,12 @@ def test_FxtVMbyBR_VMcreateAllowsCLIOverrides(
     generator.close()
 
 
-@pytest.mark.parametrize('argument', ['request', 'vmList', 'ownVMs'])
+@pytest.mark.parametrize('argument', ['request', 'fPars'])
 def test_FxtVMbyBR_VMcreateRejectsInternalKeywordReplacementBeforeOperations(
     monkeypatch: pytest.MonkeyPatch,
     argument: str,
 ) -> None:
+    Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     ocFactory = mock.MagicMock()
     virtCtlFactory = mock.MagicMock()
@@ -658,18 +856,18 @@ def test_FxtVMbyBR_VMcreateRejectsInternalKeywordReplacementBeforeOperations(
         virtCtlFactory,
     )
     bundle = next(generator)
-    sharedVMs = bundle.vmCreate.args[1]
-    sharedOwnership = bundle.vmCreate.args[2]
+    sharedVMs = bundle.vmCreate.args[1].vmList
+    sharedOwnership = bundle.vmCreate.args[1].ownVMs
 
     with pytest.raises(TypeError, match='multiple values'):
         bundle.vmCreate(**{argument: object()})
 
-    assert bundle.vmCreate.args[1] is sharedVMs
-    assert bundle.vmCreate.args[2] is sharedOwnership
-    assert bundle.vmList is sharedVMs
-    assert bundle.vmList == []
-    assert sharedOwnership == []
-    MUT.VM.GetVMuid.assert_not_called()
+    assert (bundle.vmCreate.args[1].vmList is sharedVMs)
+    assert (bundle.vmCreate.args[1].ownVMs is sharedOwnership)
+    assert (bundle.vmList is sharedVMs)
+    assert (bundle.vmList == [])
+    assert (sharedOwnership == [])
+    OCcli.GetResUID.assert_not_called()
     ocFactory.assert_not_called()
     virtCtlFactory.assert_not_called()
     generator.close()
@@ -678,12 +876,13 @@ def test_FxtVMbyBR_VMcreateRejectsInternalKeywordReplacementBeforeOperations(
 def test_FxtVMbyBR_PreyieldPartialFailureCleansCreatedVMs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     Utils.AutoPatch(monkeypatch, MUT.Path, 'is_file')
     MUT.uuid4.return_value = 'partial-rest'
     MUT.Path.is_file.return_value = False
-    MUT.VM.GetVMuid.side_effect = [
+    OCcli.GetResUID.side_effect = [
         (True, '', ''),
         (True, '', ''),
         (True, 'uid-zero', ''),
@@ -707,8 +906,8 @@ def test_FxtVMbyBR_PreyieldPartialFailureCleansCreatedVMs(
     MUT.VM.CleanUpVMs.assert_called_once_with(
         [vmZero],
         [
-            (ocZero, 'windows-vm-partial-0', 'uid-zero'),
-            (ocOne, 'windows-vm-partial-1', 'uid-one'),
+            (ocZero, 'VirtualMachine/windows-vm-partial-0', 'uid-zero'),
+            (ocOne, 'VirtualMachine/windows-vm-partial-1', 'uid-one'),
         ],
     )
 
@@ -716,12 +915,13 @@ def test_FxtVMbyBR_PreyieldPartialFailureCleansCreatedVMs(
 def test_FxtVMbyBR_LaterPartialFailureCleansAggregateOnClose(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     Utils.AutoPatch(monkeypatch, MUT.Path, 'is_file')
     MUT.uuid4.return_value = 'partial-rest'
     MUT.Path.is_file.return_value = False
-    MUT.VM.GetVMuid.side_effect = [
+    OCcli.GetResUID.side_effect = [
         (True, '', ''),
         (True, '', ''),
         (True, 'uid-zero', ''),
@@ -744,15 +944,15 @@ def test_FxtVMbyBR_LaterPartialFailureCleansAggregateOnClose(
     with pytest.raises(RuntimeError) as raised:
         bundle.vmCreate(count=2)
 
-    assert raised.value is primary
-    assert bundle.vmList == [vmZero]
+    assert (raised.value is primary)
+    assert (bundle.vmList == [vmZero])
     MUT.VM.CleanUpVMs.assert_not_called()
     generator.close()
     MUT.VM.CleanUpVMs.assert_called_once()
-    cleanupVMs, cleanupOwnership = MUT.VM.CleanUpVMs.call_args.args
-    assert cleanupVMs is bundle.vmList
-    assert cleanupVMs == [vmZero]
-    assert cleanupOwnership == [
-        (ocZero, 'windows-vm-partial-0', 'uid-zero'),
-        (ocOne, 'windows-vm-partial-1', 'uid-one'),
-    ]
+    (cleanupVMs, cleanupOwnership) = MUT.VM.CleanUpVMs.call_args.args
+    assert (cleanupVMs is bundle.vmList)
+    assert (cleanupVMs == [vmZero])
+    assert (cleanupOwnership == [
+        (ocZero, 'VirtualMachine/windows-vm-partial-0', 'uid-zero'),
+        (ocOne, 'VirtualMachine/windows-vm-partial-1', 'uid-one'),
+    ])

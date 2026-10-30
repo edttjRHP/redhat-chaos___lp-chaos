@@ -22,7 +22,9 @@ class YAMLcfg:
 
         :param templPath:           The `Path` to the Jinja2 template file.
         :param ctxData:             Context data `dict` for template rendering.
+
         :return:                    Rendered YAML as a `str`.
+
         :raises FileNotFoundError:  If the template file does not exist.
         '''
         if not templPath.exists():
@@ -37,10 +39,13 @@ class YAMLcfg:
     @staticmethod
     def ToDict(data: 'str | Dict[str, Any]') -> Dict[str, Any]:
         '''
-        Parse to a `dict`.
+        Parse YAML/JSON mapping input or return a supplied `dict`.
 
         :param data:    YAML/JSON `str` or `dict` (returned as-is).
-        :return:        Parsed `dict` (empty `dict` if the input is blank).
+
+        :return:
+            The supplied `dict` or parsed value. Truthy non-mapping values
+            are returned unchanged. Blank or other falsy results become `{}`.
         '''
         if isinstance(data, dict): return data
         return (yaml.safe_load(data) or {})
@@ -52,6 +57,7 @@ class YAMLcfg:
 
         :param data:    YAML/JSON `str` or `dict`.
         :param indent:  JSON indentation level (default: `2`).
+
         :return:        JSON `str`.
         '''
         if isinstance(data, str): data = yaml.safe_load(data) or {}
@@ -63,6 +69,7 @@ class YAMLcfg:
         Serialize as YAML.
 
         :param data:    JSON `str` or `dict`.
+
         :return:        YAML `str`.
         '''
         if isinstance(data, str): data = json.loads(data)

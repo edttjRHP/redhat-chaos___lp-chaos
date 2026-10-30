@@ -4,7 +4,7 @@ Base thin shim for Cobra-based CLI tools with common-option auto-discovery.
 import logging
 import re
 import shlex
-from typing import Optional
+from typing import Any, Optional
 
 from libs.Utils.CmdExec import CmdExec, CmdRes
 
@@ -20,14 +20,15 @@ class GoCobraCLI:
     At init, discovers common options via `'<binExec>' options` and stores
     user-provided defaults. On each call, common options go before the
     sub-command, sub-command specific options go after.
-    never shell=True.
+    Defaults to `shell=False`; explicit `spPars` options, including
+    `shell=True`, pass through to `subprocess.run()`.
     '''
 
     def __init__(
         self,
         binExec: str,
         cmdExec: Optional[CmdExec] = None,
-        **defOpts,
+        **defOpts: Any,
     ) -> None:
         '''
         Initialize and discover common options from `'<binExec>' options`.
@@ -42,7 +43,7 @@ class GoCobraCLI:
         '''
         self.binExec = binExec
         self.cmdExec = cmdExec or CmdExec()
-        self.cmnOpts = {}   # 'namespace' -> {'short': '-n', 'long': '--namespace'}
+        self.cmnOpts = {}   # 'namespace' -> short and long option spellings.
         self.shortMap = {}  # '-n' -> 'namespace' (reverse lookup)
         self.defOpts = defOpts
         self._DiscoverOptions()
@@ -62,7 +63,7 @@ class GoCobraCLI:
         for line in f'{result.stdout}\n{result.stderr}'.splitlines():
             m = re.match(r'^\s+(?:(-\w),\s+)?--([\w-]+)(?:[=\s:]|$)', line)
             if m:
-                short, name = m.group(1), m.group(2)
+                (short, name) = m.group(1), m.group(2)
                 self.cmnOpts[name] = {
                     'short': short,
                     'long': f'--{name}',
@@ -72,16 +73,17 @@ class GoCobraCLI:
     def _IsCommon(self, key: str) -> bool:
         '''Check if a key matches a discovered common option.'''
         if (len(key) == 1):
-            return f'-{key}' in self.shortMap
-        return key.replace('_', '-') in self.cmnOpts
+            return (f'-{key}' in self.shortMap)
+        return (key.replace('_', '-') in self.cmnOpts)
 
     def Run(
             self,
             subCmd: str,
-            *args,
-            input=None,
-            spPars=None,
-            **opts,
+            *args: Any,
+            input: str | bytes | None = None,
+            isSecret: bool = False,
+            spPars: Optional[dict[str, Any]] = None,
+            **opts: Any,
         ) -> CmdRes:
         '''
         Execute: <binExec> [cmnOpts...] subCmd... [subCmdOpts...] [args...]
@@ -92,7 +94,11 @@ class GoCobraCLI:
         :param args:
             Positional arguments (`str`/`int`/`float`; coerced to `str`).
         :param input:
-            Optional string piped to the process's standard input.
+            Optional string, piped to the process's standard input, passed
+            through `to subprocess.run()`.
+        :param isSecret:
+            Framework log/record suppression only; never a CLI option.
+            Raw results are unchanged and must not be logged by callers.
         :param spPars:
             Optional `dict` of extra keyword arguments passed through
             to `subprocess.run()` (e.g. `{'timeout': 30, 'env': myEnv}`).
@@ -106,8 +112,10 @@ class GoCobraCLI:
             - multi-char key         -> Long flag (`--no-headers=true`).
             - common option          -> Placed before sub-command.
             - otherwise              -> Placed after sub-command.
+
         :return:
             The `CmdRes` from `CmdExec.Run()`.
+
         :raises TypeError:
             If a positional argument or option's value is not a supported type.
         '''
@@ -136,7 +144,7 @@ class GoCobraCLI:
             if isinstance(val, bool):
                 token = [f"{flag}={'true' if val else 'false'}"]
             elif isinstance(val, _SCALAR):
-                token = [flag, str(val)]
+                token = [f'{flag}={str(val)}']
             else:
                 raise TypeError(
                     f'Option {key!r} must be any of `None`, `bool`, `str`, '
@@ -149,5 +157,6 @@ class GoCobraCLI:
         return self.cmdExec.Run(
             [self.binExec, *cmnArgs, *subCmds, *subArgs, *posArgs],
             input=input,
+            isSecret=isSecret,
             spPars=spPars,
         )

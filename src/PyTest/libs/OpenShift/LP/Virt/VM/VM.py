@@ -1,7 +1,8 @@
 '''KubeVirt VirtualMachine wrapper with lifecycle and SSH management.'''
 import logging
 import sys
-from typing import Optional
+import time
+from typing import Any, Optional
 
 from libs.CustomTypes import NamedDict
 from libs.OpenShift.LP.Virt.CLI.VirtCtl import VirtCtlCLI
@@ -21,30 +22,6 @@ class VM:
     '''
 
     @staticmethod
-    def GetVMuid(oc: OCcli, vmName: str) -> tuple[bool, str, str]:
-        '''
-        Look up a VM UID in the CLI client's configured namespace.
-
-        :param oc:
-            OpenShift CLI client configured for the target namespace.
-        :param vmName:
-            VirtualMachine resource name to look up.
-        :return:
-            A tuple where:
-              - lookupOK:   Lookup command success, not a VM-existence flag.
-              - vmUID:      Stripped VM UID output, empty when the resource is
-                            absent.
-              - lookupErr:  Stripped standard error output, which may be empty.
-        '''
-        result = oc.Run(
-            'get',
-            f'VirtualMachine/{vmName}',
-            o='jsonpath={.metadata.uid}',
-            ignore_not_found=True,
-        )
-        return (result.success, result.stdout.strip(), result.stderr.strip())
-
-    @staticmethod
     def CleanUpVMs(
         vmList: list['VM'],
         ownVMs: list[tuple[OCcli, str, str]],
@@ -56,15 +33,19 @@ class VM:
         wrappers for reused VMs. Each ownership record is looked up through the
         same CLI context used to create the resource. A VM is deleted only when
         its current UID matches the recorded UID; lookup and deletion are not
-        atomic.
+        atomic. Cleanup delegates to `OCcli.CleanUpRes()`.
 
         :param vmList:
             VM wrappers whose SSH connections are closed.
         :param ownVMs:
             Ownership records containing:
               - oc:     CLI client from the resource creation context.
-              - vmName: VirtualMachine resource name.
-              - ownUID: UID recorded after resource creation.
+              - resRef: VM Resource Reference (`VirtualMachine/<name>`).
+              - ownUID: VM UID recorded after resource creation.
+
+        :return:
+            `None` after all cleanup attempts.
+
         :raises RuntimeError:
             Cleanup continues after individual failures. After all attempts,
             aggregated failures raise `RuntimeError` when no exception is
@@ -73,50 +54,13 @@ class VM:
         '''
         primExc = sys.exc_info()[1]
         clnFail = []
-
         for vm in vmList:
             try: vm.RmvSSH()
-            except Exception as ex:
-                clnFail.append(f'Close SSH for `{vm.name}`: {ex}')
-                logs.exception(f'Could not close SSH for VM `{vm.name}`.')
-
-        for (oc, vmName, ownUID) in ownVMs:
-            try:
-                (lookupOK, curUID, lookupErr) = VM.GetVMuid(oc, vmName)
-                if not lookupOK:
-                    clnFail.append(
-                        f'Verify ownership of `{vmName}` before deletion: '
-                        f'{lookupErr}'
-                    )
-                    logs.error(
-                        f'Could not verify ownership of VM `{vmName}` before '
-                        f'deletion: {lookupErr}'
-                    )
-                    continue
-                if not curUID:
-                    logs.info(f'VM `{vmName}` is already absent.')
-                    continue
-                if (curUID != ownUID):
-                    logs.warning(
-                        f'Not deleting VM `{vmName}` because its UID changed.'
-                    )
-                    continue
-
-                phase, result = oc.DelRes(f'VirtualMachine/{vmName}')
-                if not result.success:
-                    clnFail.append(
-                        f'Delete `{vmName}` at `{phase.name}`: {result.stderr}'
-                    )
-                    logs.error(
-                        f'Could not clean up VM `{vmName}` at '
-                        f'`{phase.name}`: {result.stderr}'
-                    )
-                    continue
-                logs.info(f'Cleaned up VM `{vmName}`.')
-            except Exception as ex:
-                clnFail.append(f'Delete `{vmName}`: {ex}')
-                logs.exception(f'Could not clean up VM `{vmName}`.')
-
+            except Exception as error:
+                clnFail.append(f'Close SSH for `{vm.name}`: {error}')
+                logs.exception('Could not close SSH for VM `%s`.', vm.name)
+        try: OCcli.CleanUpRes(ownVMs)
+        except Exception as error: clnFail.append(str(error))
         if clnFail:
             clnErr = 'VM cleanup failed: ' + '; '.join(clnFail)
             if (primExc is None): raise RuntimeError(clnErr)
@@ -145,8 +89,9 @@ class VM:
         :param sshUsr:
             SSH UserName (default: `'qa-usr'`).
         :param sshKey:
-            Path to the SSH private key. If `None`, depends on the `ssh` client
-            used (for OpenSSH, it defaults to `~/.ssh/id_<xxx>`).
+            Path to the SSH private key. If `None` or empty, `NewSSH` defaults
+            to `~/.ssh/id_ed25519`; its `idFile` keyword argument can override
+            this default.
         '''
         self.name = name
         self.namespace = ns
@@ -166,38 +111,71 @@ class VM:
         )
         return result.stdout.strip("'") if result.success else ''
 
-    def Start(self) -> bool:
+    def Start(
+        self,
+        timeout: str = '5m',
+        provTO: float = 1800.0,
+    ) -> bool:
         '''
-        Start the VM if not already running or transitioning.
+        Wait for provisioning to finish, then start the VM.
 
-        :return:    `True` if the VM is starting or was already active.
+        :param timeout: Maximum time to wait for VM readiness (default: `5m`).
+        :param provTO:  Provisioning wait budget in sec. (default: `1800.0`).
+
+        :return:        `True` if the VM reaches ready state.
         '''
-        if self._Status() in (
-            'Running', 'Starting', 'Scheduling', 'Provisioning', 'Migrating'
-        ): return True
-        return self.cli.virtCtl.Run('start', self.name).success
+        provDeadline = time.monotonic() + provTO
+        while True:
+            status = self._Status()
+            if (status != 'Provisioning'): break
+            remTO = provDeadline - time.monotonic()
+            if (remTO <= 0): return False
+            time.sleep(min(5.0, remTO))
 
-    def Stop(self) -> bool:
+        if (status not in (
+            'Running', 'Starting', 'Scheduling', 'Migrating'
+        )):
+            if not self.cli.virtCtl.Run('start', self.name).success:
+                return False
+        # KubeVirt mirrors VMI Ready onto VM Ready, covering the VMI readiness.
+        return self.cli.oc.Run(
+            'wait',
+            f'VirtualMachine/{self.name}',
+            **{'for': 'condition=Ready'}, timeout=timeout,
+        ).success
+
+    def Stop(self, timeout: str = '5m') -> bool:
         '''
-        Stop the VM if not already stopped or transitioning.
+        Stop the VM.
 
-        :return:    `True` if the VM is stopping or was already inactive.
+        :param timeout: Maximum time to wait for VM stop (default: `5m`).
+
+        :return:        `True` if the VM is stopped within the given time.
         '''
-        if self._Status() in ('Stopped', 'Stopping'): return True
-        return self.cli.virtCtl.Run('stop', self.name).success
+        if (self._Status() not in ('Stopped', 'Stopping')):
+            if not self.cli.virtCtl.Run('stop', self.name).success:
+                return False
+        return self.cli.oc.Run(
+            'wait',
+            f'VirtualMachine/{self.name}',
+            **{'for': 'jsonpath={.status.printableStatus}=Stopped'},
+            timeout=timeout,
+        ).success
 
-    def NewSSH(self, probeTO: int = 300, **kwargs) -> RHOVsshCon:
+    def NewSSH(self, probeTO: int = 300, **kwargs: Any) -> RHOVsshCon:
         '''
         Create a new `RHOVsshCon` instance for this VM.
 
-        Probes SSH readiness before returning. Blocks up to `probeTO` seconds
-        waiting for SSH Server in the VM to become reachable.
+        Probes SSH readiness before returning, with a retry timeout and waits
+        capped to its remaining duration.
 
         :param probeTO:
-            SSH probe timeout in seconds (default: `300`).
+            Positive numeric SSH retry timeout in seconds (default: `300`).
         :param kwargs:
             Forwarded to `RHOVsshCon.__init__` (override `user`, `idFile`,
-            `kubeconfig`, etc.).
+            `virtCtl`, etc.). Defaults to this VM's `virtCtl` client; pass
+            `virtCtl=None` to create a client using `ns` and `kubeconfig`.
+
         :return:
             A new `RHOVsshCon` instance, probed for readiness.
         '''
@@ -205,7 +183,8 @@ class VM:
             'ns': self.namespace,
             'host': self.name,
             'user': self.sshUsr,
-            'idFile': self.sshKey or '~/.ssh/id_ed25519',
+            'idFile': (self.sshKey or '~/.ssh/id_ed25519'),
+            'virtCtl': self.cli.virtCtl,
         }
         conn = RHOVsshCon(**{**defArgs, **kwargs})
         if not conn.Probe(timeout=probeTO):
@@ -217,13 +196,13 @@ class VM:
 
     def RmvSSH(self) -> None:
         '''Remove and close the SSH connection, if active.'''
-        if self._ssh is not None:
+        if (self._ssh is not None):
             self._ssh.Close()
             self._ssh = None
 
     @property
     def ssh(self) -> RHOVsshCon:
         '''Lazy default SSH connection (created on first access).'''
-        if self._ssh is None:
+        if (self._ssh is None):
             self._ssh = self.NewSSH()
         return self._ssh

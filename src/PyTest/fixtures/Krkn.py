@@ -36,26 +36,12 @@ _DEF__FXT_CFG = NamedDict(
     ns=LPQE__DEF__NAMESPACE,
     krknPars=NamedDict(
         rootPath=NamedDict(
-            krkn=Path(os.getenv(
-                (
-                    'IENG_PYTEST____FXT__KRKN____'
-                    'DEF_FXT_CFG__ROOTPATH_KRKN'
-                ),
-                (
-                    f'{Path(__file__).resolve().parent.parent}/'
-                    'vendor/krkn'
-                ),
-            )),
-            krknHub=Path(os.getenv(
-                (
-                    'IENG_PYTEST____FXT__KRKN____'
-                    'DEF_FXT_CFG__ROOTPATH_KRKNHUB'
-                ),
-                (
-                    f'{Path(__file__).resolve().parent.parent}/'
-                    'vendor/krknHub'
-                ),
-            )),
+            krkn=Path(os.environ.get('KRKN_SRC') or ''),
+            krknHub=Path(
+                os.environ.get('KRKNHUB_SRC')
+                or os.environ.get('KRKN_HUB_SRC')
+                or ''
+            ),
         ),
     ),
     testPars=NamedDict(),
@@ -116,7 +102,28 @@ class KrknHub:
         runName: str = '__main__',
     ) -> None:
         '''
-        Prepare arguments and run Krkn in a temporary environment.
+        Apply hub prep env, build Krkn argv, run ``run_kraken.py`` in-process.
+
+        krkn-hub contract (keep shell and Python routes aligned):
+          - ``krknEnvFile``: scenario ``prep_env.sh`` (shared Env. Var. prep /
+            template render only; no argv construction).
+          - ``krknPrepMod``: scenario ``prep_args_python.py`` with
+            ``BuildArgs() -> list[str]`` matching ``prep_args_shell.sh``'s
+            ``cliArgs[@]``.
+          - For a package checkout (not the hub container), set
+            ``KRKN_HUB__IN_CONTAINER=0`` in the process env (or ``envVars``)
+            before calling. Example for ``vmi-outage``::
+
+                krknHub.Run(
+                    'vmi-outage/prep_env.sh',
+                    FuncParsKrknHub_Run_krknPrepMod(
+                        'vmi-outage/prep_args_python.py',
+                    ),
+                    envVars={'KRKN_HUB__IN_CONTAINER': '0'},
+                )
+
+        Env. Var. changes use delta apply/restore via ``TempEnv`` (no
+        ``os.environ.clear()``).
 
         :param krknEnvFile: Shell environment file relative to the root.
         :param krknPrepMod: Preparation module, callable and its arguments.
@@ -133,6 +140,12 @@ class KrknHub:
         '''
         with TempEnv():
             # Sourcing Shell Env. file to update the Env. Variables.
+            if envVars:
+                for (key, val) in envVars.items():
+                    if (val is None):
+                        os.environ.pop(str(key), None)
+                    else:
+                        os.environ[str(key)] = str(val)
             (delEnv, updEnv) = GetEnvDelta(
                 BashEnv,
                 (self.rootPath / krknEnvFile),
@@ -211,9 +224,9 @@ def FxtKrkn(
           - krknPars:
             Parameter for Krkn:
               - rootPath:
-                Root dir. of vendor packages:
-                  - krkn:       Location where `krkn` is installed.
-                  - krknHub:    Location where `krkn-hub` is installed.
+                Checkout paths (defaults: ``KRKN_SRC``, ``KRKNHUB_SRC``):
+                  - krkn:       Path to the `krkn` checkout.
+                  - krknHub:    Path to the `krkn-hub` checkout.
           - testPars:
             Parameter to be passed to test.
           - ctrImgURL_ExecNode:

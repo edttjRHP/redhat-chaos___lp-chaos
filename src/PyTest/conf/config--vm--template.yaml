@@ -3,6 +3,11 @@
 #       A non-empty mapping containing a valid CDI `DataVolume.spec.source`.
 #   - sshPublicKeyB64:
 #       A non-empty Base64-encoded OpenSSH public-key string for guest access.
+# Optional caller context (camelCase):
+#   - vmHypervTlbflushEnabled:
+#       A boolean controlling the Hyper-V TLBFlush enlightenment.
+#       Default: true (renders `tlbflush: {}`).
+#       Pass False to omit the tlbflush key entirely (OFF).
 {% if (vmDataVolumeSource is not defined) %}
     {{ {}['vmDataVolumeSource is required'].fail }}
 {% elif ((vmDataVolumeSource is not mapping) or not vmDataVolumeSource) %}
@@ -32,6 +37,14 @@
 {% set sshPublicKeyB64 = sshPublicKeyB64 | string | tojson %}
 {% set vmCpuCores = vmCpuCores | tojson %}
 {% set vmMemory = vmMemory | default('8Gi') | string | tojson %}
+{% set vmAnnotations = vmAnnotations | default({}) %}
+{% set vmNodeSelector = vmNodeSelector | default({}) %}
+{% set vmTolerations = vmTolerations | default([]) %}
+{% set vmAccessModes = vmAccessModes | default(['ReadWriteOnce']) %}
+{% set vmEvictionStrategy = vmEvictionStrategy | default(None) %}
+{% set vmHypervTlbflushEnabled = (
+    vmHypervTlbflushEnabled if vmHypervTlbflushEnabled is defined else true
+) %}
 ################################################################################
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
@@ -40,9 +53,12 @@ metadata:
   namespace: {{ vmNS }}
   labels:
     usrMeta.vmGroup: {{ vmName }}
+  {% if vmAnnotations %}
+  annotations: {{ vmAnnotations | tojson }}
+  {% endif %}
 spec:
   dataVolumeTemplates:
-    - apiVersion: cdi.kubevirt.io/v1beta1
+    - apiVersion: cdi.kubevirt.io/v1
       kind: DataVolume
       metadata:
         annotations:
@@ -53,19 +69,29 @@ spec:
       spec:
         source: {{ vmDataVolumeSource }}
         storage:
-          accessModes:
-            - ReadWriteOnce
+          accessModes: {{ vmAccessModes | tojson }}
           resources:
             requests:
               storage: {{ vmStorageSize }}
           storageClassName: {{ vmStorageClass }}
   runStrategy: Manual
+  {% if vmEvictionStrategy is defined and vmEvictionStrategy %}
+  evictionStrategy: {{ vmEvictionStrategy | tojson }}
+  {% endif %}
   template:
     metadata:
       labels:
         kubevirt.io/domain: {{ vmName }}
         kubevirt.io/vm: {{ vmName }}
     spec:
+      {% if vmNodeSelector %}
+      nodeSelector: {{ vmNodeSelector | tojson }}
+      {% endif %}
+
+      {% if vmTolerations %}
+      tolerations: {{ vmTolerations | tojson }}
+      {% endif %}
+
       architecture: amd64
       domain:
         clock:
@@ -110,7 +136,9 @@ spec:
             synic: {}
             synictimer:
               direct: {}
+            {% if vmHypervTlbflushEnabled %}
             tlbflush: {}
+            {% endif %}
             vapic: {}
             vpindex: {}
           smm: {}

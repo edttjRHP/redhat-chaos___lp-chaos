@@ -1,0 +1,5 @@
+# Ignore everything in this dir. and its sub-dir.
+*
+
+# Whitelist this `.gitignore` file so the directory structure can be tracked.
+!.gitignore

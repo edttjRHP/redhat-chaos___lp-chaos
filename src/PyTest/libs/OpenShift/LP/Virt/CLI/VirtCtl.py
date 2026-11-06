@@ -1,5 +1,5 @@
 '''Thin shim around the `virtctl` CLI.'''
-from typing import Optional
+from typing import Any, Optional
 
 from libs.Utils.CLI import GoCobraCLI
 from libs.Utils.CmdExec import CmdExec
@@ -17,7 +17,7 @@ class VirtCtlCLI(GoCobraCLI):
         self,
         binExec: str = 'virtctl',
         cmdExec: Optional[CmdExec] = None,
-        **defOpts,
+        **defOpts: Any,
     ) -> None:
         '''
         :param binExec:

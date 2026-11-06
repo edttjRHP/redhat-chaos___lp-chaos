@@ -1,10 +1,16 @@
 import logging
 from pathlib import Path
 import time
+from typing import TYPE_CHECKING
 
 import pytest
 
+from libs.CustomTypes import NamedDict
 from libs.OpenShift.LP.Virt.VM.VM import VM
+
+
+if TYPE_CHECKING:
+    from fixtures.BenchmarkRunner import FxtObjVMbyBR
 
 
 logs = logging.getLogger()
@@ -13,15 +19,18 @@ logs = logging.getLogger()
 class TestBSOD():
     '''BSOD tests'''
 
-    @pytest.mark.vm
+    @pytest.mark.vm__br
     @pytest.mark.parametrize(
-        'vmCreate,',
-        [({'ns': 'bsod-test', 'namePfx': 'bsod-2022'},)],
+        'fxtVMbyBR,',
+        [({
+            'ns': 'bsod-test',
+            'fxtInf': NamedDict(brCfg=NamedDict(count=1)),
+        },)],
         indirect=True,
     )
-    def test_VMcreate(self, vmCreate):
-        '''Create a VM then test its connectiviy via SSH.'''
-        testVM = vmCreate[0]
+    def test_VMcreate(self, fxtVMbyBR: 'FxtObjVMbyBR') -> None:
+        '''Create a VM then test its connectivity via SSH.'''
+        testVM = fxtVMbyBR.vmList[0]
         logs.info(f'VM name: {testVM.name}')
         logs.info(f'SSH target: {testVM.ssh.target}')
 
@@ -29,7 +38,7 @@ class TestBSOD():
         result = testVM.ssh.RunPowerShell(
             'Get-ComputerInfo | Select-Object CsName'
         )
-        logs.info(f'Execution time: {time.perf_counter()-start}')
+        logs.info(f'Execution time: {(time.perf_counter()-start)}')
         assert result.success
         logs.info(result.stdout)
 
@@ -38,7 +47,7 @@ class TestBSOD():
             Path('/Users/vvijay/scripts/guest/churn.ps1'),
             'C:/TEMP/',
         )
-        logs.info(f'Execution time: {time.perf_counter()-start}')
+        logs.info(f'Execution time: {(time.perf_counter()-start)}')
         assert result.success
 
         start = time.perf_counter()
@@ -46,12 +55,16 @@ class TestBSOD():
             Path('C:/TEMP/churn.ps1'),
             '/Users/vvijay/scripts/check',
         )
-        logs.info(f'Execution time: {time.perf_counter()-start}')
+        logs.info(f'Execution time: {(time.perf_counter()-start)}')
         assert result.success
 
     @pytest.mark.vm__br
-    @pytest.mark.parametrize('fxtVMbyBR,', [({'count': 2},)], indirect=True)
-    def test_BenchmarkRunner(self, fxtVMbyBR):
+    @pytest.mark.parametrize(
+        'fxtVMbyBR,',
+        [({'fxtInf': NamedDict(brCfg=NamedDict(count=2))},)],
+        indirect=True,
+    )
+    def test_BenchmarkRunner(self, fxtVMbyBR: 'FxtObjVMbyBR') -> None:
         for vm in fxtVMbyBR.vmList:
             logs.info(f'VM name: {vm.name}')
             logs.info(f'SSH target: {vm.ssh.target}')

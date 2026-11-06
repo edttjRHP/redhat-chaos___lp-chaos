@@ -5,17 +5,21 @@
 #       A non-empty Base64-encoded OpenSSH public-key string for guest access.
 {% if (vmDataVolumeSource is not defined) %}
     {{ {}['vmDataVolumeSource is required'].fail }}
-{% elif (vmDataVolumeSource is not mapping or not vmDataVolumeSource) %}
+{% elif ((vmDataVolumeSource is not mapping) or not vmDataVolumeSource) %}
     {{ {}['vmDataVolumeSource must be a non-empty mapping'].fail }}
 {% endif %}
 {% if (sshPublicKeyB64 is not defined) %}
     {{ {}['sshPublicKeyB64 is required'].fail }}
-{% elif (sshPublicKeyB64 is not string or not (sshPublicKeyB64 | trim)) %}
+{% elif ((sshPublicKeyB64 is not string) or not (sshPublicKeyB64 | trim)) %}
     {{ {}['sshPublicKeyB64 must be a non-empty string'].fail }}
 {% endif %}
-{% if (vmCpuCores is defined and (vmCpuCores is not integer or vmCpuCores <= 0)) %}
+{% if (
+    (vmCpuCores is defined) and
+    ((vmCpuCores is not integer) or (vmCpuCores <= 0))
+  ) %}
     {{ {}['vmCpuCores must be a positive integer'].fail }}
 {% endif %}
+####
 {% set vmName = vmName | default('vm-img--windows') | string %}
 {% set vmDataVolumeName = vmDataVolumeName | default(vmName + '--vhd--00-system') | string %}
 {% set vmCpuCores = vmCpuCores | default(4) %}
@@ -28,6 +32,7 @@
 {% set sshPublicKeyB64 = sshPublicKeyB64 | string | tojson %}
 {% set vmCpuCores = vmCpuCores | tojson %}
 {% set vmMemory = vmMemory | default('8Gi') | string | tojson %}
+################################################################################
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
@@ -41,7 +46,7 @@ spec:
       kind: DataVolume
       metadata:
         annotations:
-          cdi.kubevirt.io/storage.bind.immediate.requested: "true"
+          cdi.kubevirt.io/storage.bind.immediate.requested: 'true'
         name: {{ vmDataVolumeName }}
         labels:
           usrMeta.volGroup: {{ vmName }}

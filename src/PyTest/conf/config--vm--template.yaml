@@ -21,25 +21,34 @@
 {% endif %}
 ####
 {% set vmName = vmName | default('vm-img--windows') | string %}
-{% set vmDataVolumeName = vmDataVolumeName | default(vmName + '--vhd--00-system') | string %}
-{% set vmCpuCores = vmCpuCores | default(4) %}
-{% set vmName = vmName | tojson %}
 {% set vmNS = vmNS | default('default') | string | tojson %}
+{% set vmAnnotations = vmAnnotations | default({}) %}
+{% set vmDataVolumeName = vmDataVolumeName | default(vmName + '--vhd--00-system') | string %}
+{% set vmName = vmName | tojson %}
 {% set vmDataVolumeName = vmDataVolumeName | tojson %}
 {% set vmDataVolumeSource = vmDataVolumeSource | tojson %}
+{% set vmStorageAccessModes = vmStorageAccessModes | default(['ReadWriteOnce']) %}
 {% set vmStorageSize = vmStorageSize | default('96Gi') | string | tojson %}
 {% set vmStorageClass = vmStorageClass | default('gp3-csi') | string | tojson %}
-{% set sshPublicKeyB64 = sshPublicKeyB64 | string | tojson %}
+{% set vmEvictionStrategy = vmEvictionStrategy | default(None) %}
+{% set vmNodeSelector = vmNodeSelector | default({}) %}
+{% set vmTolerations = vmTolerations | default([]) %}
+{% set vmCpuCores = vmCpuCores | default(4) %}
 {% set vmCpuCores = vmCpuCores | tojson %}
+{% set vmFeatures__Hyperv_Tlbflush__Ena = vmFeatures__Hyperv_Tlbflush__Ena | default(false) %}
 {% set vmMemory = vmMemory | default('8Gi') | string | tojson %}
+{% set sshPublicKeyB64 = sshPublicKeyB64 | string | tojson %}
 ################################################################################
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
-  name: {{ vmName }}
-  namespace: {{ vmNS }}
+  {%- if vmAnnotations %}
+  annotations: {{ vmAnnotations | tojson }}
+  {%- endif %}
   labels:
     usrMeta.vmGroup: {{ vmName }}
+  name: {{ vmName }}
+  namespace: {{ vmNS }}
 spec:
   dataVolumeTemplates:
     - apiVersion: cdi.kubevirt.io/v1beta1
@@ -47,25 +56,33 @@ spec:
       metadata:
         annotations:
           cdi.kubevirt.io/storage.bind.immediate.requested: 'true'
-        name: {{ vmDataVolumeName }}
         labels:
           usrMeta.volGroup: {{ vmName }}
+        name: {{ vmDataVolumeName }}
       spec:
         source: {{ vmDataVolumeSource }}
         storage:
-          accessModes:
-            - ReadWriteOnce
+          accessModes: {{ vmStorageAccessModes | tojson }}
           resources:
             requests:
               storage: {{ vmStorageSize }}
           storageClassName: {{ vmStorageClass }}
   runStrategy: Manual
+  {%- if vmEvictionStrategy %}
+  evictionStrategy: {{ vmEvictionStrategy | tojson }}
+  {%- endif %}
   template:
     metadata:
       labels:
         kubevirt.io/domain: {{ vmName }}
         kubevirt.io/vm: {{ vmName }}
     spec:
+      {%- if vmNodeSelector %}
+      nodeSelector: {{ vmNodeSelector | tojson }}
+      {%- endif %}
+      {%- if vmTolerations %}
+      tolerations: {{ vmTolerations | tojson }}
+      {%- endif %}
       architecture: amd64
       domain:
         clock:
@@ -110,7 +127,9 @@ spec:
             synic: {}
             synictimer:
               direct: {}
+            {%- if vmFeatures__Hyperv_Tlbflush__Ena %}
             tlbflush: {}
+            {%- endif %}
             vapic: {}
             vpindex: {}
           smm: {}
@@ -147,3 +166,4 @@ spec:
                     encoding: b64
                     content: {{ sshPublicKeyB64 }}
           name: cloud-init-disk
+          

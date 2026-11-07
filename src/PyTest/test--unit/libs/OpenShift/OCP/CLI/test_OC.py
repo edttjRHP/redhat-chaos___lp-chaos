@@ -143,8 +143,8 @@ def test_EnsureRes_DefaultWaitAndCallerOptionsAreForwarded(
             'resYAMLorSubCmd', 'owned', 'isSecret', 'existResDelTO',
             'optsNewRes',
         ]),
-        ('CleanUpRes', ['ownRes']),
-        ('CleanUpVMs', ['vmList', 'ownVMs']),
+        ('CleanUpRes', ['ownRes', 'optsDelRes']),
+        ('CleanUpVMs', ['vmList', 'ownVMs', 'optsCleanUpRes']),
     ],
 )
 def test_ResourceAPI_DocstringsRetainContractsAnd79Columns(
@@ -276,11 +276,13 @@ def test_GetResUID_PreservesLookupContract(success: bool) -> None:
         'success',
     ],
 )
+@pytest.mark.parametrize('options', [None, {'waitTime': '5m'}])
 def test_CleanUpRes_ChecksOwnershipContinuesAndPreservesPrimary(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     primary: bool,
     outcome: str,
+    options: dict | None,
 ) -> None:
     cli = mock.create_autospec(MUT.OCcli, instance=True)
     later = mock.create_autospec(MUT.OCcli, instance=True)
@@ -311,13 +313,13 @@ def test_CleanUpRes_ChecksOwnershipContinuesAndPreservesPrimary(
         with pytest.raises(
             RuntimeError, match='Resource cleanup failed'
         ) as caught:
-            MUT.OCcli.CleanUpRes(records)
+            MUT.OCcli.CleanUpRes(records, optsDelRes=options)
         assert ('synthetic-sensitive' in str(caught.value))
     else:
-        MUT.OCcli.CleanUpRes(records)
+        MUT.OCcli.CleanUpRes(records, optsDelRes=options)
     later.GetResUID.assert_called_once_with('secret/later')
     if (outcome in ('success', 'delete-failed')):
-        cli.DelRes.assert_called_once_with('secret/example')
+        cli.DelRes.assert_called_once_with('secret/example', **(options or {}))
     else:
         cli.DelRes.assert_not_called()
     if (failed and primary):
@@ -798,6 +800,30 @@ def test_NewRes_MissingWaitIdentityRaisesExplicitError() -> None:
     assert ((phase == MUT.OCcli.ResPhase.APPLIED) and result.success)
     assert (resource == {'metadata': {'uid': 'uid'}})
     assert (cli.Run.call_count == 2)
+
+
+@pytest.mark.parametrize('options', [
+    None, {}, {'waitTime': '5m'},
+    {'resRef': 'VirtualMachine/unowned', 'waitTime': '7m'},
+])
+def test_CleanUpRes_ForwardsOptionsWithoutMutatingOrReplacingOwnership(
+    options: dict | None,
+) -> None:
+    cli = BuildCLI()
+    cli.Run.side_effect = [Result(True, 'owned'), Result(True)]
+    before = None if (options is None) else dict(options)
+
+    MUT.OCcli.CleanUpRes(
+        [(cli, 'VirtualMachine/example', 'owned')], optsDelRes=options,
+    )
+
+    assert (cli.Run.call_count == 2)
+    assert (cli.Run.call_args_list[-1] == mock.call(
+        'delete', 'VirtualMachine/example',
+        ignore_not_found=True,
+        timeout=(options or {}).get('waitTime', '2m'), wait='true',
+    ))
+    assert (options == before)
 
 
 def test_DelRes_FailureAndSuccess() -> None:

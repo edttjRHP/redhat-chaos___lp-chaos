@@ -35,13 +35,22 @@ def ProvisionClock(monkeypatch: pytest.MonkeyPatch) -> Utils.FakeClock:
 @pytest.mark.parametrize('sshFailed', [False, True])
 @pytest.mark.parametrize('cleanupFailed', [False, True])
 @pytest.mark.parametrize('primary', [False, True])
+@pytest.mark.parametrize('options', [
+    None, {}, {'optsDelRes': {'waitTime': '5m'}},
+    {'ownRes': 'unowned', 'optsDelRes': {'waitTime': '7m'}},
+])
 def test_CleanUpVMs_ClosesSSHAndDelegatesDespiteErrors(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     sshFailed: bool,
     cleanupFailed: bool,
     primary: bool,
+    options: dict | None,
 ) -> None:
+    before = None if (options is None) else {
+        key: dict(value) if isinstance(value, dict) else value
+        for (key, value) in options.items()
+    }
     vm = SimpleNamespace(name='example', RmvSSH=mock.Mock())
     if sshFailed: vm.RmvSSH.side_effect = RuntimeError('SSH failed')
     cleanup = mock.Mock(
@@ -58,11 +67,14 @@ def test_CleanUpVMs_ClosesSSHAndDelegatesDespiteErrors(
     owned = [(OCmock(), 'VirtualMachine/example', 'owned')]
     if ((sshFailed or cleanupFailed) and not primary):
         with pytest.raises(RuntimeError, match='VM cleanup failed'):
-            MUT.VM.CleanUpVMs([vm], owned)
+            MUT.VM.CleanUpVMs([vm], owned, optsCleanUpRes=options)
     else:
-        MUT.VM.CleanUpVMs([vm], owned)
+        MUT.VM.CleanUpVMs([vm], owned, optsCleanUpRes=options)
     vm.RmvSSH.assert_called_once_with()
-    cleanup.assert_called_once_with(owned)
+    expected = dict(options or {})
+    expected.pop('ownRes', None)
+    cleanup.assert_called_once_with(owned, **expected)
+    assert (options == before)
     if ((sshFailed or cleanupFailed) and primary):
         assert ('preserving primary exception' in caplog.text)
 

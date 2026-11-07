@@ -4,7 +4,10 @@ typeset _scrPath="$(p="${BASH_SOURCE[0]}"; [ "${p:0:1}" = / ] || p="./${p}"; CDP
 set -euxo pipefail; shopt -s inherit_errexit
 
 typeset e=
-typeset -a reqArgs=("-r" "${_scrPath}/requirements--main.txt")
+typeset -a reqArgs=(
+    "-r" "${_scrPath}/requirements--main.txt"
+    "-r" "${_scrPath}/requirements--unit.txt"
+)
 typeset -A vEnvRootArr=(
     [BenchmarkRunner]=\
 "${IENG_PYTEST____FXT__BENCHMARKRUNNER____DEF_FXT_CFG__ROOTPATH_BR:-\

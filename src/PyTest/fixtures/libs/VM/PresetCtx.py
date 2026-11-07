@@ -26,7 +26,10 @@ modelNodeHog = modelBase | NamedDict(
     vmMemory='16Gi',
     vmNodeSelector={
         'kubernetes.io/hostname': os.getenv(
-            'IENG_PYTEST____FXT__LIBS_VM__PRESETCTX____NODE_HOG__NODE_SELECTOR',
+            (
+                'IENG_PYTEST____FXT__LIBS_VM__PRESETCTX____'
+                'NODE_HOG__NODE_SELECTOR'
+            ),
             'PLACEHOLDER_REPLACE_WITH_TARGET_NODE_NAME',
         ),
     },
@@ -37,4 +40,3 @@ modelMigrationStorm = modelBase | NamedDict(
     vmStorageAccessModes=['ReadWriteMany'],
     vmEvictionStrategy='LiveMigrate',
 )
-

@@ -341,7 +341,10 @@ class OCcli(GoCobraCLI):
         return (result.success, result.stdout.strip(), result.stderr.strip())
 
     @staticmethod
-    def CleanUpRes(ownRes: list[tuple['OCcli', str, str]]) -> None:
+    def CleanUpRes(
+        ownRes: list[tuple['OCcli', str, str]],
+        optsDelRes: Optional[dict[str, Any]] = None,
+    ) -> None:
         '''
         Delete resources recorded as owned through their creation CLI clients.
 
@@ -354,12 +357,16 @@ class OCcli(GoCobraCLI):
               - oc:     CLI client from the resource creation context.
               - resRef: Resource Reference (`<kind>/<name>`).
               - ownUID: Resource UID recorded after resource creation.
+        :param optsDelRes:
+            Resource deletion options to be passed to `OCcli.DelRes()`.
 
         :raises RuntimeError:
             Aggregated failures raise `RuntimeError` when no exception is
             active. Otherwise, failures are logged and the active exception is
             preserved.
         '''
+        optsDelRes = dict(optsDelRes or {})
+        optsDelRes.pop('resRef', None)
         primExc = sys.exc_info()[1]
         clnFail = []
         for (oc, resRef, ownUID) in ownRes:
@@ -385,7 +392,7 @@ class OCcli(GoCobraCLI):
                         resRef,
                     )
                     continue
-                (phase, result) = oc.DelRes(resRef)
+                (phase, result) = oc.DelRes(resRef, **optsDelRes)
                 if not result.success:
                     clnFail.append(f'Delete `{resRef}` at `{phase.name}`: '
                                    f'{result.stderr}')

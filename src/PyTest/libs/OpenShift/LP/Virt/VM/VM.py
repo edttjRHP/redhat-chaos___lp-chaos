@@ -25,6 +25,7 @@ class VM:
     def CleanUpVMs(
         vmList: list['VM'],
         ownVMs: list[tuple[OCcli, str, str]],
+        optsCleanUpRes: Optional[dict[str, Any]] = None,
     ) -> None:
         '''
         Close SSH connections and delete VM resources recorded as owned.
@@ -42,6 +43,8 @@ class VM:
               - oc:     CLI client from the resource creation context.
               - resRef: VM Resource Reference (`VirtualMachine/<name>`).
               - ownUID: VM UID recorded after resource creation.
+        :param optsCleanUpRes:
+            Resource cleanup options to be passed to `OCcli.CleanUpRes()`.
 
         :raises RuntimeError:
             Cleanup continues after individual failures. After all attempts,
@@ -49,6 +52,8 @@ class VM:
             active. Otherwise, failures are logged and the active exception is
             preserved.
         '''
+        optsCleanUpRes = dict(optsCleanUpRes or {})
+        optsCleanUpRes.pop('ownRes', None)
         primExc = sys.exc_info()[1]
         clnFail = []
         for vm in vmList:
@@ -56,7 +61,7 @@ class VM:
             except Exception as error:
                 clnFail.append(f'Close SSH for `{vm.name}`: {error}')
                 logs.exception('Could not close SSH for VM `%s`.', vm.name)
-        try: OCcli.CleanUpRes(ownVMs)
+        try: OCcli.CleanUpRes(ownVMs, **optsCleanUpRes)
         except Exception as error: clnFail.append(str(error))
         if clnFail:
             clnErr = 'VM cleanup failed: ' + '; '.join(clnFail)

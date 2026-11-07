@@ -34,7 +34,7 @@ values replace, and new keys are inserted unchanged. Plain dictionaries cannot o
 Fixture-specific settings belong under `fxtInf`, not at the top level:
   - `fxtVM`: `fxtInf.vmCfg` contains `count`, `cfgFile`, `namePfx`, `reuseExisting`, `ctxData`, and `timeout`.
     Guest image and connection settings belong under `fxtInf.gstCfg`.
-  - `fxtVMbyBR`: `fxtInf.brCfg` contains `count`, `workloadName`, and `workloadKind`.
+  - `fxtVMbyBR`: `fxtInf.brCfg` contains `count`, `wlName`, and `wlKind`.
     Guest connection settings belong under `fxtInf.gstCfg`.
   - `fxtKrkn`: parameters belong under `fxtInf.krknCfg`; vendor paths are `fxtInf.rootPath.krkn` and
     `fxtInf.rootPath.krknHub`.
@@ -92,11 +92,11 @@ The `YAMLcfg.Render` accepts caller-owned `ctxData` for `conf/config--vm--templa
       - vmCpuCores (`4`): Constraint: `> 0`.
       - vmMemory (`'8Gi'`)
 
-String fields are converted and JSON-serialized once during initialization, then reused in manifest expressions:
+Header values remain native; each variable is JSON-serialized once where it is inserted into YAML:
 ```yaml
-{% set vmNS = vmNS | default('default') | string | tojson %}
+{% set vmNS = vmNS | default('default') %}
 ...
-namespace: {{ vmNS }}
+namespace: {{ vmNS | tojson }}
 ```
 This preserves YAML-looking strings and escapes special characters.
 

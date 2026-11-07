@@ -1,12 +1,15 @@
 import base64
+from itertools import product
 from pathlib import Path
 from unittest import mock
 
 from jinja2.exceptions import UndefinedError
+from jinja2 import nodes
 import pytest
 import yaml
 
 import libs.Utils.YAML as MUT
+from fixtures.libs.VM import PresetCtx
 import Utils
 
 
@@ -29,6 +32,128 @@ REQUIRED_VM_CONTEXT = {
     'vmDataVolumeSource': VM_SOURCE,
     'sshPublicKeyB64': SSH_PUBLIC_KEY_B64,
 }
+
+
+def test_Render_VMtemplate_OrdersNativeDefaultsAndEmissionFilters() -> None:
+    source = VM_TEMPLATE.read_text()
+    (header, body) = source.split('apiVersion: kubevirt.io/v1', 1)
+    environment = MUT.Environment()
+    headerTree = environment.parse(header)
+    bodyTree = environment.parse(body)
+    assignments = [
+        node.target.name for node in headerTree.find_all(nodes.Assign)
+    ]
+    firstUses = list(dict.fromkeys(
+        node.name for node in bodyTree.find_all(nodes.Name)
+        if ((node.ctx == 'load') and (node.name in assignments))
+    ))
+    assert (assignments == firstUses)
+    assert (len(assignments) == len(set(assignments)))
+    assert not any(
+        (node.name == 'tojson') for node in headerTree.find_all(nodes.Filter)
+    )
+    assert not any(
+        (node.name == 'string')
+        for node in environment.parse(source).find_all(nodes.Filter)
+    )
+    emissions = [
+        expression for output in bodyTree.find_all(nodes.Output)
+        for expression in output.nodes
+        if not isinstance(expression, nodes.TemplateData)
+    ]
+    assert (len(emissions) == 21)
+    for expression in emissions:
+        assert isinstance(expression, nodes.Filter)
+        assert (expression.name == 'tojson')
+        assert isinstance(expression.node, nodes.Name)
+    lines = header.rstrip().splitlines()
+    assert (len(lines[-1]) == 80)
+    assert all((len(line) <= 79) for line in lines[:-1])
+
+
+@pytest.mark.parametrize(
+    ('annotations', 'eviction', 'selector', 'tolerations', 'tlbflush'),
+    list(product((False, True), repeat=5)),
+)
+def test_Render_VMtemplate_OrdersOptionalMappingsAndRetainsNativeTypes(
+    annotations: bool,
+    eviction: bool,
+    selector: bool,
+    tolerations: bool,
+    tlbflush: bool,
+) -> None:
+    context = REQUIRED_VM_CONTEXT | {
+        'vmName': 'true', 'vmNS': 'false', 'vmCpuCores': 7,
+        'vmAnnotations': {'z.review': 'quoted"\n', 'a.review': 'first'}
+        if annotations else {},
+        'vmEvictionStrategy': 'LiveMigrate' if eviction else None,
+        'vmNodeSelector': {'z.review': 'last', 'a.review': 'first'}
+        if selector else {},
+        'vmTolerations': [
+            {'key': 'second', 'operator': 'Exists'},
+            {'key': 'first', 'operator': 'Exists'},
+        ] if tolerations else [],
+        'vmFeatures__Hyperv_Tlbflush__Ena': tlbflush,
+        'sshPublicKeyB64': '1234',
+    }
+    vm = yaml.safe_load(MUT.YAMLcfg.Render(VM_TEMPLATE, context))
+
+    def CheckKeys(value: object) -> None:
+        if isinstance(value, dict):
+            assert (list(value) == sorted(value))
+            for child in value.values(): CheckKeys(child)
+        elif isinstance(value, list):
+            for child in value: CheckKeys(child)
+
+    CheckKeys(vm)
+    assert (vm['metadata']['name'] == 'true')
+    assert (vm['metadata']['namespace'] == 'false')
+    spec = vm['spec']['template']['spec']
+    assert (type(spec['domain']['cpu']['cores']) is int)
+    assert (spec['domain']['cpu']['cores'] == 7)
+    dvName = vm['spec']['dataVolumeTemplates'][0]['metadata']['name']
+    assert (dvName == 'true--vhd--00-system')
+    assert (spec['volumes'][0]['dataVolume']['name'] == dvName)
+    assert (('annotations' in vm['metadata']) is annotations)
+    for (field, enabled) in (
+        ('evictionStrategy', eviction), ('nodeSelector', selector),
+        ('tolerations', tolerations),
+    ):
+        assert ((field in spec) is enabled)
+    if annotations:
+        assert (vm['metadata']['annotations'] == context['vmAnnotations'])
+    if selector: assert (spec['nodeSelector'] == context['vmNodeSelector'])
+    if tolerations: assert (spec['tolerations'] == context['vmTolerations'])
+    assert (('tlbflush' in spec['domain']['features']['hyperv']) is tlbflush)
+    cloud = yaml.safe_load(spec['volumes'][1]['cloudInitNoCloud']['userData'])
+    assert (cloud['write_files'][0]['content'] == '1234')
+
+
+@pytest.mark.parametrize('preset', [
+    'modelBase', 'modelNodeHog', 'modelMigrationStorm',
+])
+def test_Render_VMtemplate_PreservesPresetValuesAndExplicitDVname(
+    preset: str,
+) -> None:
+    settings = dict(getattr(PresetCtx, preset))
+    context = REQUIRED_VM_CONTEXT | settings | {
+        'vmName': 'native-vm', 'vmDataVolumeName': 'explicit-system-disk',
+    }
+    vm = yaml.safe_load(MUT.YAMLcfg.Render(VM_TEMPLATE, context))
+    volume = vm['spec']['dataVolumeTemplates'][0]
+    spec = vm['spec']['template']['spec']
+    assert (volume['metadata']['name'] == 'explicit-system-disk')
+    assert (spec['volumes'][0]['dataVolume']['name'] == 'explicit-system-disk')
+    assert (volume['spec']['storage']['accessModes'] ==
+            settings['vmStorageAccessModes'])
+    assert (volume['spec']['storage']['storageClassName'] ==
+            settings['vmStorageClass'])
+    assert (spec['domain']['cpu']['cores'] == settings['vmCpuCores'])
+    assert (type(spec['domain']['cpu']['cores']) is int)
+    assert (spec['domain']['memory']['guest'] == settings['vmMemory'])
+    if settings['vmEvictionStrategy']:
+        assert (spec['evictionStrategy'] == settings['vmEvictionStrategy'])
+    else: assert ('evictionStrategy' not in spec)
 
 
 def test_Render_UsesTemplateEnvironment(
@@ -299,36 +424,50 @@ def test_Render_VMtemplate_StringFieldsRoundTripExactlyOnce(
         'requests': {'memory': value},
     })
     assert (template['spec']['volumes'][0]['dataVolume']['name'] == value)
+    for emitted in (
+        vm['metadata']['namespace'], dataVolume['metadata']['name'],
+        dataVolume['spec']['storage']['resources']['requests']['storage'],
+        dataVolume['spec']['storage']['storageClassName'],
+        domain['memory']['guest'],
+        template['spec']['volumes'][0]['dataVolume']['name'],
+    ):
+        assert (type(emitted) is type(value))
 
 
 @pytest.mark.parametrize('value', [123, 1.25, True, None])
-def test_Render_VMtemplate_StringFieldsConvertNativeValues(
+def test_Render_VMtemplate_RejectsNonStringVMnameWithoutCoercion(
     value: object,
 ) -> None:
-    context = REQUIRED_VM_CONTEXT | {
-        'vmName': value,
-        'vmNS': value,
-        'vmDataVolumeName': value,
-        'vmStorageSize': value,
-        'vmStorageClass': value,
-        'vmMemory': value,
-    }
+    with pytest.raises(TypeError):
+        MUT.YAMLcfg.Render(
+            VM_TEMPLATE, REQUIRED_VM_CONTEXT | {'vmName': value},
+        )
+
+
+@pytest.mark.parametrize('value', [123, 1.25, True, None])
+def test_Render_VMtemplate_PreservesNativeScalarEmissions(
+    value: object,
+) -> None:
+    fields = (
+        'vmNS', 'vmDataVolumeName', 'vmStorageSize', 'vmStorageClass',
+        'vmMemory',
+    )
+    context = REQUIRED_VM_CONTEXT | dict.fromkeys(fields, value)
 
     vm = yaml.safe_load(MUT.YAMLcfg.Render(VM_TEMPLATE, context))
-    expected = str(value)
     dataVolume = vm['spec']['dataVolumeTemplates'][0]
     template = vm['spec']['template']
     domain = template['spec']['domain']
 
-    assert (vm['metadata']['name'] == expected)
-    assert (vm['metadata']['namespace'] == expected)
-    assert (dataVolume['metadata']['name'] == expected)
+    assert (vm['metadata']['namespace'] == value)
+    assert (type(vm['metadata']['namespace']) is type(value))
+    assert (dataVolume['metadata']['name'] == value)
     assert (dataVolume['spec']['storage']['resources']['requests'] == {
-        'storage': expected,
+        'storage': value,
     })
-    assert (dataVolume['spec']['storage']['storageClassName'] == expected)
-    assert (domain['memory']['guest'] == expected)
-    assert (template['spec']['volumes'][0]['dataVolume']['name'] == expected)
+    assert (dataVolume['spec']['storage']['storageClassName'] == value)
+    assert (domain['memory']['guest'] == value)
+    assert (template['spec']['volumes'][0]['dataVolume']['name'] == value)
 
 
 @pytest.mark.parametrize(
@@ -401,16 +540,16 @@ def test_Render_VMtemplate_RejectsInvalidContractValues(
     vmName.__str__.assert_not_called()
 
 
-def test_Render_VMtemplate_CoercesVMnameAfterValidChecks() -> None:
+def test_Render_VMtemplate_RejectsNonSerializableNameWithoutCoercion() -> None:
     vmName = mock.MagicMock()
     vmName.__str__.side_effect = AssertionError('VM name conversion reached')
 
-    with pytest.raises(AssertionError, match='VM name conversion reached'):
+    with pytest.raises(TypeError, match='not JSON serializable'):
         MUT.YAMLcfg.Render(
             VM_TEMPLATE, REQUIRED_VM_CONTEXT | {'vmName': vmName},
         )
 
-    vmName.__str__.assert_called_once_with()
+    vmName.__str__.assert_not_called()
 
 
 def test_Render_VMtemplate_PreservesStructuredSourceTypes() -> None:

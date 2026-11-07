@@ -1,44 +1,48 @@
+{#-
 # Required caller context (camelCase):
 #   - vmDataVolumeSource:
 #       A non-empty mapping containing a valid CDI `DataVolume.spec.source`.
 #   - sshPublicKeyB64:
 #       A non-empty Base64-encoded OpenSSH public-key string for guest access.
-{% if (vmDataVolumeSource is not defined) %}
-    {{ {}['vmDataVolumeSource is required'].fail }}
-{% elif ((vmDataVolumeSource is not mapping) or not vmDataVolumeSource) %}
-    {{ {}['vmDataVolumeSource must be a non-empty mapping'].fail }}
-{% endif %}
-{% if (sshPublicKeyB64 is not defined) %}
-    {{ {}['sshPublicKeyB64 is required'].fail }}
-{% elif ((sshPublicKeyB64 is not string) or not (sshPublicKeyB64 | trim)) %}
-    {{ {}['sshPublicKeyB64 must be a non-empty string'].fail }}
-{% endif %}
-{% if (
+-#}
+{%- if (vmDataVolumeSource is not defined) -%}
+    {{ {}['The `vmDataVolumeSource` is required.'].fail }}
+{%- elif ((vmDataVolumeSource is not mapping) or not vmDataVolumeSource) -%}
+    {{ {}['The `vmDataVolumeSource` must be a non-empty mapping.'].fail }}
+{%- endif -%}
+{%- if (sshPublicKeyB64 is not defined) -%}
+    {{ {}['The `sshPublicKeyB64` is required.'].fail }}
+{%- elif ((sshPublicKeyB64 is not string) or not (sshPublicKeyB64 | trim)) -%}
+    {{ {}['The `sshPublicKeyB64` must be a non-empty string.'].fail }}
+{%- endif -%}
+{%- if (
     (vmCpuCores is defined) and
     ((vmCpuCores is not integer) or (vmCpuCores <= 0))
-  ) %}
-    {{ {}['vmCpuCores must be a positive integer'].fail }}
-{% endif %}
-####
-{% set vmName = vmName | default('vm-img--windows') | string %}
-{% set vmNS = vmNS | default('default') | string | tojson %}
-{% set vmAnnotations = vmAnnotations | default({}) %}
-{% set vmDataVolumeName = vmDataVolumeName | default(vmName + '--vhd--00-system') | string %}
-{% set vmName = vmName | tojson %}
-{% set vmDataVolumeName = vmDataVolumeName | tojson %}
-{% set vmDataVolumeSource = vmDataVolumeSource | tojson %}
-{% set vmStorageAccessModes = vmStorageAccessModes | default(['ReadWriteOnce']) %}
-{% set vmStorageSize = vmStorageSize | default('96Gi') | string | tojson %}
-{% set vmStorageClass = vmStorageClass | default('gp3-csi') | string | tojson %}
-{% set vmEvictionStrategy = vmEvictionStrategy | default(None) %}
-{% set vmNodeSelector = vmNodeSelector | default({}) %}
-{% set vmTolerations = vmTolerations | default([]) %}
-{% set vmCpuCores = vmCpuCores | default(4) %}
-{% set vmCpuCores = vmCpuCores | tojson %}
-{% set vmFeatures__Hyperv_Tlbflush__Ena = vmFeatures__Hyperv_Tlbflush__Ena | default(false) %}
-{% set vmMemory = vmMemory | default('8Gi') | string | tojson %}
-{% set sshPublicKeyB64 = sshPublicKeyB64 | string | tojson %}
-################################################################################
+) -%}
+    {{ {}['The `vmCpuCores` must be a positive integer.'].fail }}
+{%- endif -%}
+{#- ---- -#}
+{%- set vmAnnotations = vmAnnotations | default({}) -%}
+{%- set vmName = vmName | default('vm-img--windows') -%}
+{%- set vmNS = vmNS | default('default') -%}
+{%- set vmDataVolumeName = (
+    vmDataVolumeName | default((vmName + '--vhd--00-system'))
+) -%}
+{%- set vmStorageAccessModes = (
+    vmStorageAccessModes | default(['ReadWriteOnce'])
+) -%}
+{%- set vmStorageSize = vmStorageSize | default('96Gi') -%}
+{%- set vmStorageClass = vmStorageClass | default('gp3-csi') -%}
+{%- set vmCpuCores = vmCpuCores | default(4) -%}
+{%- set vmFeatures__Hyperv_Tlbflush__Ena = (
+  vmFeatures__Hyperv_Tlbflush__Ena | default(false)
+) -%}
+{%- set vmMemory = vmMemory | default('8Gi') -%}
+{%- set vmEvictionStrategy = vmEvictionStrategy | default(None) -%}
+{%- set vmNodeSelector = vmNodeSelector | default({}) -%}
+{%- set vmTolerations = vmTolerations | default([]) -%}
+{%- set sshPublicKeyB64 = sshPublicKeyB64 -%}
+{#- ======================================================================== -#}
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
@@ -46,9 +50,9 @@ metadata:
   annotations: {{ vmAnnotations | tojson }}
   {%- endif %}
   labels:
-    usrMeta.vmGroup: {{ vmName }}
-  name: {{ vmName }}
-  namespace: {{ vmNS }}
+    usrMeta.vmGroup: {{ vmName | tojson }}
+  name: {{ vmName | tojson }}
+  namespace: {{ vmNS | tojson }}
 spec:
   dataVolumeTemplates:
     - apiVersion: cdi.kubevirt.io/v1beta1
@@ -57,32 +61,23 @@ spec:
         annotations:
           cdi.kubevirt.io/storage.bind.immediate.requested: 'true'
         labels:
-          usrMeta.volGroup: {{ vmName }}
-        name: {{ vmDataVolumeName }}
+          usrMeta.volGroup: {{ vmName | tojson }}
+        name: {{ vmDataVolumeName | tojson }}
       spec:
-        source: {{ vmDataVolumeSource }}
+        source: {{ vmDataVolumeSource | tojson }}
         storage:
           accessModes: {{ vmStorageAccessModes | tojson }}
           resources:
             requests:
-              storage: {{ vmStorageSize }}
-          storageClassName: {{ vmStorageClass }}
+              storage: {{ vmStorageSize | tojson }}
+          storageClassName: {{ vmStorageClass | tojson }}
   runStrategy: Manual
-  {%- if vmEvictionStrategy %}
-  evictionStrategy: {{ vmEvictionStrategy | tojson }}
-  {%- endif %}
   template:
     metadata:
       labels:
-        kubevirt.io/domain: {{ vmName }}
-        kubevirt.io/vm: {{ vmName }}
+        kubevirt.io/domain: {{ vmName | tojson }}
+        kubevirt.io/vm: {{ vmName | tojson }}
     spec:
-      {%- if vmNodeSelector %}
-      nodeSelector: {{ vmNodeSelector | tojson }}
-      {%- endif %}
-      {%- if vmTolerations %}
-      tolerations: {{ vmTolerations | tojson }}
-      {%- endif %}
       architecture: amd64
       domain:
         clock:
@@ -90,7 +85,7 @@ spec:
             hyperv:
               present: true
         cpu:
-          cores: {{ vmCpuCores }}
+          cores: {{ vmCpuCores | tojson }}
           sockets: 1
           threads: 1
         devices:
@@ -140,18 +135,27 @@ spec:
         machine:
           type: q35
         memory:
-          guest: {{ vmMemory }}
+          guest: {{ vmMemory | tojson }}
         resources:
           limits:
-            memory: {{ vmMemory }}
+            memory: {{ vmMemory | tojson }}
           requests:
-            memory: {{ vmMemory }}
+            memory: {{ vmMemory | tojson }}
+      {%- if vmEvictionStrategy %}
+      evictionStrategy: {{ vmEvictionStrategy | tojson }}
+      {%- endif %}
       networks:
         - name: nic--0
           pod: {}
+      {%- if vmNodeSelector %}
+      nodeSelector: {{ vmNodeSelector | tojson }}
+      {%- endif %}
+      {%- if vmTolerations %}
+      tolerations: {{ vmTolerations | tojson }}
+      {%- endif %}
       volumes:
         - dataVolume:
-            name: {{ vmDataVolumeName }}
+            name: {{ vmDataVolumeName | tojson }}
           name: vhd--00-fs-rootfs
         - cloudInitNoCloud:
             userData: |
@@ -164,6 +168,5 @@ spec:
                 write_files:
                   - path: C:\ProgramData\Scripts\Data--App--CloudBaseInit--SSH.txt
                     encoding: b64
-                    content: {{ sshPublicKeyB64 }}
+                    content: {{ sshPublicKeyB64 | tojson }}
           name: cloud-init-disk
-          

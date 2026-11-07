@@ -14,7 +14,7 @@ import pytest
 import yaml
 
 import fixtures.VM as MUT
-from fixtures.VM import FxtVM
+from fixtures.VM import FxtVM as FxtVM
 from libs.OpenShift.LP.Virt.CLI.VirtCtl import VirtCtlCLI
 from libs.OpenShift.OCP.CLI.OC import OCcli
 import Utils
@@ -61,13 +61,9 @@ def LocalContext(
     monkeypatch.chdir(tmp_path)
     keyPath = tmp_path / 'private-key'
     monkeypatch.setenv('VMCTX__KEY_DIR', str(tmp_path))
-    generated = subprocess.run(
-        ['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(keyPath)],
-        capture_output=True, text=True, timeout=30,
-    )
-    assert (generated.returncode == 0)
-    publicKey = keyPath.with_suffix('.pub').read_text()
-    keyPath.with_suffix('.pub').unlink()
+    keyPath.write_text('unit-private-ed25519')
+    keyPath.chmod(0o600)
+    publicKey = 'ssh-ed25519 unit-public-private-key\n'
     access = tmp_path / 'access'
     secret = tmp_path / 'relative-secret'
     access.write_text('synthetic-access-value\n')
@@ -92,7 +88,40 @@ def LocalContext(
         'file--AccKeyId': str(access),
         'file--AccKeySecret': 'relative-secret',
     }
-    originalRun = subprocess.run
+    def KeyRun(command: list[str], **kwargs: Any) -> Any:
+        '''Model key-file command results without running OpenSSH.'''
+        assert (command[0] == 'ssh-keygen')
+        assert kwargs['capture_output']
+        assert (kwargs['timeout'] == 30)
+        path = Path(command[command.index('-f') + 1])
+        if ('-q' in command):
+            algorithm = command[command.index('-t') + 1]
+            assert (algorithm in ('ed25519', 'rsa'))
+            assert (command[command.index('-N') + 1] == '')
+            path.write_text(f'unit-private-{algorithm}')
+            path.chmod(0o600)
+            path.with_suffix(path.suffix + '.pub').write_text(
+                f'ssh-{algorithm} unit-public-{path.name}\n',
+            )
+            output = ''
+        elif ('-p' in command):
+            assert (command[command.index('-P') + 1] == '')
+            assert (command[command.index('-N') + 1] == 'synthetic-passphrase')
+            path.write_text('unit-encrypted-private')
+            output = ''
+        else:
+            assert (command[:5] == ['ssh-keygen', '-y', '-P', '', '-f'])
+            content = ''
+            if path.is_file():
+                with open(path, encoding='utf-8') as stream:
+                    content = stream.read()
+            if (content not in ('unit-private-ed25519', 'unit-private-rsa')):
+                return subprocess.CompletedProcess(command, 1, '', 'invalid')
+            algorithm = content.removeprefix('unit-private-')
+            output = f'ssh-{algorithm} unit-public-{path.name}\n'
+        if not kwargs.get('text'): output = output.encode()
+        return subprocess.CompletedProcess(command, 0, output, '')
+
     state = SimpleNamespace(
         cfg=cfg,
         keyPath=keyPath,
@@ -100,6 +129,7 @@ def LocalContext(
         resources=[],
         commands=[],
         present={},
+        statuses={},
         fail='',
         secrets={},
         namespaces={},
@@ -114,7 +144,7 @@ def LocalContext(
             addfinalizer=request.addfinalizer,
         ),
         recorder=Utils.RecordingExec(),
-        nativeRun=originalRun,
+        nativeRun=KeyRun,
     )
 
     def ClusterRun(command: list[str], **kwargs: Any) -> Any:
@@ -142,7 +172,7 @@ def LocalContext(
                         command, 1, 'synthetic-sensitive-stdout',
                         'synthetic-sensitive-stderr',
                     )
-                return originalRun(command, **kwargs)
+                return KeyRun(command, **kwargs)
             assert (command[:5] == ['ssh-keygen', '-y', '-P', '', '-f'])
             assert (
                 Path(command[5]).absolute().is_relative_to(tmp_path) or
@@ -158,7 +188,7 @@ def LocalContext(
                 return subprocess.CompletedProcess(
                     command, 0, '  \n', '',
                 )
-            return originalRun(command, **kwargs)
+            return KeyRun(command, **kwargs)
         assert (command[0] in ('oc-unit', 'virtctl-unit', 'virtctl'))
         command = [
             part for arg in command
@@ -209,10 +239,32 @@ def LocalContext(
                     )
             elif ('jsonpath={.metadata.namespace}' in command):
                 stdout = ns
+            elif any(
+                (part.replace("'", '') == 'jsonpath={.status.printableStatus}')
+                for part in command
+            ):
+                assert (name in state.present)
+                stdout = state.statuses.get(name, 'Stopped')
             else:
                 stdout = state.present.get(name, '')
+        elif ('start' in command):
+            assert (command[0] in ('virtctl-unit', 'virtctl'))
+            assert (command[-2] == 'start')
+            name = command[-1]
+            assert (name in state.present)
+            assert command[command.index('-n') + 1]
+            if (state.fail == 'start-exception'):
+                raise RuntimeError('synthetic start failure')
+            if (state.fail == 'start-false'):
+                return subprocess.CompletedProcess(command, 1, '', 'start')
+            state.statuses[name] = 'Running'
         elif ('wait' in command):
-            pass
+            if ('condition=Ready' in command):
+                assert command[-1].startswith('VirtualMachine/')
+                assert (command[-1].split('/')[-1] in state.present)
+                assert command[command.index('--timeout') + 1]
+                if (state.fail == 'ready-false'):
+                    return subprocess.CompletedProcess(command, 1, '', 'ready')
         elif ('delete' in command):
             assert all(path.exists() for path in state.generated)
             ref = command[-1]

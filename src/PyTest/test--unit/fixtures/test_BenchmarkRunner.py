@@ -1,6 +1,7 @@
 from dataclasses import FrozenInstanceError
 import json
 import builtins
+import os
 from types import SimpleNamespace
 from unittest import mock
 
@@ -30,16 +31,96 @@ def PatchRunner(
 def test__DEF__FXT_CFG_UsesNestedWorkloadConfiguration() -> None:
     cfg = MUT._DEF__FXT_CFG
     assert (cfg.fxtInf.brCfg == NamedDict(
-        count=1, workloadName='windows', workloadKind='vm',
+        count=1, startVM=True, wlName='windows', wlKind='vm', brEnv={},
+        timeout=NamedDict(vmStart='15m', vmRemove='5m'),
     ))
-    assert ('workloadName' not in cfg)
-    assert ('workloadKind' not in cfg)
+    assert ('wlName' not in cfg)
+    assert ('wlKind' not in cfg)
     merged = cfg | NamedDict(
-        fxtInf=NamedDict(brCfg=NamedDict(workloadKind='custom')),
+        fxtInf=NamedDict(brCfg=NamedDict(wlKind='custom')),
     )
-    assert (merged.fxtInf.brCfg.workloadName == 'windows')
-    assert (merged.fxtInf.brCfg.workloadKind == 'custom')
-    assert (cfg.fxtInf.brCfg.workloadKind == 'vm')
+    assert (merged.fxtInf.brCfg.wlName == 'windows')
+    assert (merged.fxtInf.brCfg.wlKind == 'custom')
+    assert (cfg.fxtInf.brCfg.wlKind == 'vm')
+
+
+@pytest.mark.parametrize('outcome', ['ready', 'false', 'exception', 'manual'])
+@pytest.mark.parametrize('customTimeout', [None, '7m'])
+def test_FxtVMbyBR_StartTracksOwnershipAndPreservesFailures(
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+    customTimeout: str | None,
+) -> None:
+    Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
+    Utils.AutoPatch(monkeypatch, MUT, 'VM')
+    Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
+    MUT.uuid4.return_value = 'startup-rest'
+    OCcli.GetResUID.side_effect = [
+        (True, '', ''), (True, '', ''),
+        (True, 'uid-zero', ''), (True, 'uid-one', ''),
+    ]
+    runner = BenchmarkRunnerVenv('/synthetic/artifacts')
+    PatchRunner(monkeypatch, runner)
+    wrappers = [mock.Mock(), mock.Mock()]
+    for (index, vm) in enumerate(wrappers):
+        vm.namespace = 'default'
+        vm.name = f'windows-vm-startup-{index}'
+    MUT.VM.side_effect = wrappers
+    primary = RuntimeError('synthetic startup failure')
+    if (outcome == 'exception'): wrappers[0].Start.side_effect = primary
+    else: wrappers[0].Start.return_value = (outcome != 'false')
+    wrappers[1].Start.return_value = True
+    monkeypatch.setenv('UNIT_BR_CUSTOM', 'parent')
+    config = NamedDict(
+        count=2, startVM=(outcome != 'manual'),
+        brEnv={
+            'UNIT_BR_CUSTOM': 'child',
+            'SAVE_ARTIFACTS_LOCAL': 'false', 'DELETE_ALL': 'yes',
+        },
+    )
+    if customTimeout:
+        config = config | NamedDict(timeout=NamedDict(
+            vmStart=customTimeout, vmRemove='11m',
+        ))
+    clients = [mock.Mock(), mock.Mock()]
+    generator = MUT.FxtVMbyBR.__wrapped__(
+        SimpleNamespace(param={'fxtInf': NamedDict(brCfg=config)}),
+        mock.Mock(side_effect=clients), mock.Mock(),
+    )
+    if (outcome in ('false', 'exception')):
+        with pytest.raises(RuntimeError) as caught:
+            next(generator)
+        if (outcome == 'exception'): assert (caught.value is primary)
+        else: assert ('default/windows-vm-startup-0' in str(caught.value))
+        tracked = wrappers[:1]
+        wrappers[1].Start.assert_not_called()
+    else:
+        bundle = next(generator)
+        assert (bundle.vmList == wrappers)
+        MUT.VM.CleanUpVMs.assert_not_called()
+        generator.close()
+        tracked = wrappers
+    MUT.VM.CleanUpVMs.assert_called_once_with(tracked, [
+        (clients[0], 'VirtualMachine/windows-vm-startup-0', 'uid-zero'),
+        (clients[1], 'VirtualMachine/windows-vm-startup-1', 'uid-one'),
+    ], optsCleanUpRes={'optsDelRes': {
+        'waitTime': ('11m' if customTimeout else '5m'),
+    }})
+    if (outcome == 'manual'):
+        for vm in wrappers: vm.Start.assert_not_called()
+    else:
+        wrappers[0].Start.assert_called_once_with(
+            timeout=(customTimeout or '15m'),
+        )
+        if (outcome == 'ready'):
+            wrappers[1].Start.assert_called_once_with(
+                timeout=(customTimeout or '15m'),
+            )
+    environment = runner.call.call_args.kwargs['envUpd']
+    assert (environment['SAVE_ARTIFACTS_LOCAL'] == 'true')
+    assert (environment['DELETE_ALL'] == 'no')
+    assert (environment['UNIT_BR_CUSTOM'] == 'child')
+    assert (os.environ['UNIT_BR_CUSTOM'] == 'parent')
 
 
 def test_FuncParsVMcreateByBR_RequiresConfigAndKeepsMutableLists() -> None:
@@ -94,7 +175,7 @@ def test_FxtVMbyBR_RetainsSetupAndIsolatesTemporaryOverrides(
         ),
         'fxtInf': NamedDict(
             rootPath=NamedDict(br=MUT.Path('/setup/br-venv')),
-            brCfg=NamedDict(workloadName='setup', count=0),
+            brCfg=NamedDict(wlName='setup', count=0),
             gstCfg=NamedDict(usrCrd=NamedDict(sshUsr='setup-user')),
         ),
     }
@@ -104,7 +185,7 @@ def test_FxtVMbyBR_RetainsSetupAndIsolatesTemporaryOverrides(
         'cliCfg': NamedDict(ocCfg={'context': 'call-context'}),
         'fxtInf': NamedDict(
             rootPath=NamedDict(br=MUT.Path('/call/br-venv')),
-            brCfg=NamedDict(count=1),
+            brCfg=NamedDict(count=1, timeout=NamedDict(vmRemove='71s')),
             gstCfg=NamedDict(usrCrd=NamedDict(sshUsr='call-user')),
         ),
     }
@@ -176,6 +257,9 @@ def test_FxtVMbyBR_RetainsSetupAndIsolatesTemporaryOverrides(
     )
     generator.close()
     (cleanupVMs, cleanupOwnership) = MUT.VM.CleanUpVMs.call_args.args
+    assert (MUT.VM.CleanUpVMs.call_args.kwargs == {
+        'optsCleanUpRes': {'optsDelRes': {'waitTime': '5m'}},
+    })
     assert (cleanupVMs is bundle.vmList)
     assert (cleanupOwnership is fPars.ownResTrk.VMs)
     assert ([record[2] for record in cleanupOwnership] == [
@@ -320,7 +404,7 @@ def test_VMcreateByBR_SingleVMhappyPathUsesGeneratedIdentityKey(
         cliCfg=NamedDict(ocCfg={'context': 'oc-context'}),
         fxtInf=NamedDict(
             rootPath=NamedDict(br=MUT.Path('/custom/br-venv')),
-            brCfg=NamedDict(workloadName='windows', workloadKind='vm'),
+            brCfg=NamedDict(wlName='windows', wlKind='vm'),
             gstCfg=NamedDict(usrCrd=NamedDict(sshUsr='unit-user')),
         ),
     )
@@ -339,6 +423,7 @@ def test_VMcreateByBR_SingleVMhappyPathUsesGeneratedIdentityKey(
     assert (environment['RUN_TYPE'] == 'test_ci')
     assert (environment['NAMESPACE'] == 'default')
     assert (environment['DELETE_ALL'] == 'no')
+    assert (environment['SAVE_ARTIFACTS_LOCAL'] == 'true')
     assert (environment['SCALE'] == '')
     assert (environment['SCALE_NODES'] == '')
     assert (environment['UUID'] == str(MUT.uuid4.return_value))
@@ -397,7 +482,7 @@ def test_VMcreateByBR_ScalePathNamesVMsAndUsesFallbackKey(
         ocCLI=ocFactory,
         virtCtlCLI=virtCtlFactory,
         fxtInf=NamedDict(
-            brCfg=NamedDict(workloadName='windows_scale', count=2),
+            brCfg=NamedDict(wlName='windows_scale', count=2),
         ),
     )
 
@@ -726,7 +811,7 @@ def test_FxtVMbyBR_InitialSuccessUsesSelectedConfigAndCleansOnClose(
             ),
             'ns': 'initial-ns',
             'fxtInf': NamedDict(
-                brCfg=NamedDict(workloadName='initial', count=1),
+                brCfg=NamedDict(wlName='initial', count=1),
             ),
         }),
         fxtOCcli=ocFactory,
@@ -748,6 +833,7 @@ def test_FxtVMbyBR_InitialSuccessUsesSelectedConfigAndCleansOnClose(
     MUT.VM.CleanUpVMs.assert_called_once_with(
         bundle.vmList,
         [(oc, 'VirtualMachine/initial-vm-initial', 'initial-uid')],
+        optsCleanUpRes={'optsDelRes': {'waitTime': '5m'}},
     )
 
 
@@ -786,10 +872,10 @@ def test_FxtVMbyBR_PerCallReturnsAreAggregatedAcrossBatches(
     bundle = next(generator)
 
     firstBatch = bundle.vmCreate(
-        fxtInf=NamedDict(brCfg=NamedDict(workloadName='first', count=1)),
+        fxtInf=NamedDict(brCfg=NamedDict(wlName='first', count=1)),
     )
     secondBatch = bundle.vmCreate(
-        fxtInf=NamedDict(brCfg=NamedDict(workloadName='second', count=2)),
+        fxtInf=NamedDict(brCfg=NamedDict(wlName='second', count=2)),
     )
 
     assert (firstBatch == [vmOne])
@@ -804,6 +890,7 @@ def test_FxtVMbyBR_PerCallReturnsAreAggregatedAcrossBatches(
             (ocTwo, 'VirtualMachine/second-vm-second-0', 'uid-two'),
             (ocThree, 'VirtualMachine/second-vm-second-1', 'uid-three'),
         ],
+        optsCleanUpRes={'optsDelRes': {'waitTime': '5m'}},
     )
 
 
@@ -932,6 +1019,7 @@ def test_FxtVMbyBR_PreyieldPartialFailureCleansCreatedVMs(
             (ocZero, 'VirtualMachine/windows-vm-partial-0', 'uid-zero'),
             (ocOne, 'VirtualMachine/windows-vm-partial-1', 'uid-one'),
         ],
+        optsCleanUpRes={'optsDelRes': {'waitTime': '5m'}},
     )
 
 
@@ -975,6 +1063,9 @@ def test_FxtVMbyBR_LaterPartialFailureCleansAggregateOnClose(
     generator.close()
     MUT.VM.CleanUpVMs.assert_called_once()
     (cleanupVMs, cleanupOwnership) = MUT.VM.CleanUpVMs.call_args.args
+    assert (MUT.VM.CleanUpVMs.call_args.kwargs == {
+        'optsCleanUpRes': {'optsDelRes': {'waitTime': '5m'}},
+    })
     assert (cleanupVMs is bundle.vmList)
     assert (cleanupVMs == [vmZero])
     assert (cleanupOwnership == [
@@ -1016,7 +1107,9 @@ def test_FxtVMbyBR_SetupFailurePreservesPrimaryAndCleansOwnedVMs(
         next(generator)
 
     assert (raised.value is primary)
-    MUT.VM.CleanUpVMs.assert_called_once_with([], [owned])
+    MUT.VM.CleanUpVMs.assert_called_once_with(
+        [], [owned], optsCleanUpRes={'optsDelRes': {'waitTime': '5m'}},
+    )
     if cleanupFails:
         assert (
             'Could not clean up fixture VMs: cleanup failure' in caplog.text
@@ -1059,7 +1152,10 @@ def test_FxtVMbyBR_TeardownSurfacesCleanupFailureWithoutPrimary(
     else:
         finish()
 
-    MUT.VM.CleanUpVMs.assert_called_once_with(bundle.vmList, owned)
+    MUT.VM.CleanUpVMs.assert_called_once_with(
+        bundle.vmList, owned,
+        optsCleanUpRes={'optsDelRes': {'waitTime': '5m'}},
+    )
     assert (bundle.vmList == [vm])
 
 
@@ -1086,5 +1182,8 @@ def test_FxtVMbyBR_TestFailurePreservesPrimaryWhenCleanupFails(
         generator.throw(primary)
 
     assert (raised.value is primary)
-    MUT.VM.CleanUpVMs.assert_called_once_with(bundle.vmList, owned)
+    MUT.VM.CleanUpVMs.assert_called_once_with(
+        bundle.vmList, owned,
+        optsCleanUpRes={'optsDelRes': {'waitTime': '5m'}},
+    )
     assert ('Could not clean up fixture VMs: cleanup failure' in caplog.text)

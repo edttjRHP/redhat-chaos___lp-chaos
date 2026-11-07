@@ -43,10 +43,13 @@ _DEF__FXT_CFG = NamedDict(
             ctxData={},
             namePfx='lpqe-test',
             count=1,
+            startVM=True,
             reuseExisting=False,
             timeout=NamedDict(
                 vmCreate='15m',
                 dvImport='30m',
+                vmStart='15m',
+                vmRemove='3m',
             ),
         ),
         gstCfg=NamedDict(
@@ -218,7 +221,8 @@ def VMcreate(
         A list of `VM` instances created or reused by this call.
 
     :raises ValueError:    Invalid VM, image or credential configuration.
-    :raises RuntimeError:  Resource resolution or VM provisioning failed.
+    :raises RuntimeError:
+        Resource resolution, VM provisioning and/or startup failed.
     '''
     fxtCfg = fPars.fxtCfgObj | NamedDict(fxtCfgArgs)
     if fxtCfgArgs: fxtCfg = _ResolveSSHkeys(fxtCfg, fPars.sshKeyDirs)
@@ -263,6 +267,7 @@ def VMcreate(
                     f'VM `{vmName}` already exists (set '
                     '`fxtInf.vmCfg.reuseExisting` to `True` to reuse it).'
                 )
+            resource = {}
         else:
             if not ctxData:
                 imgSrc = fxtCfg.fxtInf.gstCfg.imgSrc.CDI
@@ -400,7 +405,6 @@ def VMcreate(
                 optsNewRes={'waitTime': fxtCfg.fxtInf.vmCfg.timeout.vmCreate},
             )
             logs.info('VM `%s` resolved.', vmName)
-            vmResLst.append((oc, resource))
 
         newVMs.append(VM(
             name=vmName,
@@ -410,11 +414,12 @@ def VMcreate(
             **(fxtCfg.fxtInf.gstCfg.usrCrd + {'sshKey': sshKey.prv}),
         ))
         fPars.vmList.append(newVMs[-1])
+        vmResLst.append((oc, resource, newVMs[-1]))
 
-    for (oc, resource) in vmResLst:
-        volumes = (resource or {}).get('spec', {}).get(
-            'template', {},
-        ).get('spec', {}).get('volumes', [])
+    for (oc, resource, vm) in vmResLst:
+        volumes = resource.get('spec', {}).get('template', {}).get(
+            'spec', {},
+        ).get('volumes', [])
         for dvName in dict.fromkeys(
             volume['dataVolume']['name'] for volume in volumes
             if ('dataVolume' in volume)
@@ -428,6 +433,12 @@ def VMcreate(
             if not result.success:
                 raise RuntimeError(
                     f'DataVolume `{dvName}` import failed: {result.stderr}'
+                )
+
+        if fxtCfg.fxtInf.vmCfg.startVM:
+            if not vm.Start(timeout=fxtCfg.fxtInf.vmCfg.timeout.vmStart):
+                raise RuntimeError(
+                    f'VM `{vm.namespace}/{vm.name}` failed to start.'
                 )
 
     return newVMs
@@ -479,7 +490,8 @@ def FxtVM(
                     `sshPublicKeyB64`.
                   - namePfx:
                     Prefix for generated VM names (default: `'lpqe-test'`).
-                  - count:  Number of VMs to create (default: `1`).
+                  - count:      Number of VMs to create (default: `1`).
+                  - startVM:    Start each VM (default: `True`).
                   - fxtInf.vmCfg.reuseExisting:
                     Reuse VMs with generated names that already exist instead
                     of failing on a name collision (default: `False`).
@@ -494,6 +506,10 @@ def FxtVM(
                       - dvImport:
                         Wait timeout for DV Import, for each referenced
                         DataVolume in a new VM.
+                      - vmStart:
+                        The `timeout` par. for `VM.Start()` (default: `'15m'`).
+                      - vmRemove:
+                        VM deletion wait at fixture teardown (default: `'3m'`).
               - gstCfg:
                 Guest System configurations:
                   - usrCrd:
@@ -597,7 +613,14 @@ def FxtVM(
         clnFail = False
         clnExc = None
         try:
-            if (vmList or ownResTrk.VMs): VM.CleanUpVMs(vmList, ownResTrk.VMs)
+            if (vmList or ownResTrk.VMs):
+                VM.CleanUpVMs(
+                    vmList,
+                    ownResTrk.VMs,
+                    optsCleanUpRes={'optsDelRes': {
+                        'waitTime': fxtCfg.fxtInf.vmCfg.timeout.vmRemove,
+                    }},
+                )
         except Exception as error:
             clnFail = True
             clnExc = error

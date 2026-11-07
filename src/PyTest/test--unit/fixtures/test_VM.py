@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import inspect
 from dataclasses import FrozenInstanceError
+import functools
 import json
 import logging
 from pathlib import Path
@@ -258,7 +259,7 @@ def test__DEF__FXT_CFG_UsesNestedVMConfiguration() -> None:
     assert (type(cfg.fxtInf.vmCfg.ctxData) is dict)
     assert (cfg.fxtInf.vmCfg.ctxData == {})
     assert (cfg.fxtInf.vmCfg.timeout == NamedDict(
-        vmCreate='15m', dvImport='30m',
+        vmCreate='15m', dvImport='30m', vmStart='15m', vmRemove='3m',
     ))
     assert ('configFile' not in cfg)
     assert ('timeout' not in cfg)
@@ -372,11 +373,13 @@ def test_VMcreate_DefaultContextRejectsMismatchedTypes(
     [], ['actual-disk'], ['os', 'data', 'os'],
 ])
 @pytest.mark.parametrize('reuse', [False, True])
+@pytest.mark.parametrize('startVM', [False, True])
 def test_VMcreate_WaitsReferencedImportsAfterTrackingAllVMs(
     monkeypatch: pytest.MonkeyPatch,
     count: int,
     dvNames: list[str],
     reuse: bool,
+    startVM: bool,
 ) -> None:
     Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT.YAMLcfg, 'Render')
@@ -387,15 +390,27 @@ def test_VMcreate_WaitsReferencedImportsAfterTrackingAllVMs(
     Utils.AutoPatch(monkeypatch, MUT.Namespace, 'Create')
     clients = [OCmock() for _ in range(count)]
     waits = []
+    events = []
+    wrappers = [mock.Mock() for _ in range(count)]
+    MUT.VM.side_effect = wrappers
 
-    def Wait(*args: Any, **opts: Any) -> CmdRes:
+    def Wait(index: int, *args: Any, **opts: Any) -> CmdRes:
         assert (len(params.vmList) == count)
         assert (len(params.ownResTrk.VMs) == count)
         waits.append((args, opts))
+        events.append(('DV', index, args[1]))
         return CommandResult(True)
 
+    def Start(index: int, **opts: Any) -> bool:
+        assert (params.vmList == wrappers)
+        assert (len(params.ownResTrk.VMs) == (0 if reuse else count))
+        assert (opts == {'timeout': '15m'})
+        events.append(('Start', index))
+        return True
+
     for (index, client) in enumerate(clients):
-        client.Run.side_effect = Wait
+        client.Run.side_effect = functools.partial(Wait, index)
+        wrappers[index].Start.side_effect = functools.partial(Start, index)
         client.vmNewRes.return_value = (
             OCcli.ResPhase.WAITED, CommandResult(True), {
                 'metadata': {'uid': f'new-{index}'},
@@ -421,6 +436,7 @@ def test_VMcreate_WaitsReferencedImportsAfterTrackingAllVMs(
                 timeout=NamedDict(dvImport='7m'),
                 count=count,
                 reuseExisting=reuse,
+                startVM=startVM,
             ),
             gstCfg=NamedDict(imgSrc=NamedDict(CDI=NamedDict(credType='None'))),
         ),
@@ -434,6 +450,81 @@ def test_VMcreate_WaitsReferencedImportsAfterTrackingAllVMs(
     ]
     assert (waits == expected)
     assert (len(params.ownResTrk.VMs) == (0 if reuse else count))
+    expectedEvents = []
+    for index in range(count):
+        if not reuse:
+            expectedEvents.extend(
+                ('DV', index, f'DataVolume/{index}-{name}')
+                for name in dict.fromkeys(dvNames)
+            )
+        if startVM: expectedEvents.append(('Start', index))
+        else: wrappers[index].Start.assert_not_called()
+    assert (events == expectedEvents)
+
+
+@pytest.mark.usefixtures('localPreparation')
+@pytest.mark.parametrize('outcome', ['ready', 'false', 'exception'])
+@pytest.mark.parametrize('customTimeout', [None, '7m'])
+def test_FxtVM_StartFailureCleansAllResolvedVMsAndPreservesPrimary(
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+    customTimeout: str | None,
+) -> None:
+    Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
+    Utils.AutoPatch(monkeypatch, MUT.Namespace, 'Create')
+    Utils.AutoPatch(monkeypatch, MUT.YAMLcfg, 'Render')
+    Utils.AutoPatch(monkeypatch, MUT, 'VM')
+    OCcli.GetResUID.return_value = (True, '', '')
+    MUT.YAMLcfg.Render.side_effect = RenderVM
+    clients = [OCmock(), OCmock()]
+    wrappers = [mock.Mock(), mock.Mock()]
+    for (index, vm) in enumerate(wrappers):
+        vm.name = f'startup-{index}'
+        vm.namespace = 'default'
+        clients[index].vmNewRes.return_value = (
+            OCcli.ResPhase.WAITED, CommandResult(True),
+            {'metadata': {'uid': f'uid-{index}'}},
+        )
+    MUT.VM.side_effect = wrappers
+    primary = RuntimeError('synthetic start exception')
+    if (outcome == 'exception'): wrappers[0].Start.side_effect = primary
+    else: wrappers[0].Start.return_value = (outcome != 'false')
+    wrappers[1].Start.return_value = True
+    config = NamedDict(count=2, namePfx='startup')
+    if customTimeout:
+        config = config | NamedDict(timeout=NamedDict(
+            vmStart=customTimeout, vmRemove='11m',
+        ))
+    generator = MUT.FxtVM.__wrapped__(
+        Request({'fxtInf': NamedDict(
+            vmCfg=config,
+            gstCfg=NamedDict(imgSrc=NamedDict(CDI=NamedDict(credType='None'))),
+        )}),
+        mock.Mock(side_effect=clients), mock.Mock(),
+    )
+    if (outcome == 'ready'):
+        bundle = next(generator)
+        assert (bundle.vmList == wrappers)
+        generator.close()
+        wrappers[1].Start.assert_called_once_with(
+            timeout=(customTimeout or '15m'),
+        )
+    else:
+        with pytest.raises(RuntimeError) as caught:
+            next(generator)
+        if (outcome == 'exception'): assert (caught.value is primary)
+        else: assert ('default/startup-0' in str(caught.value))
+        wrappers[1].Start.assert_not_called()
+    wrappers[0].Start.assert_called_once_with(
+        timeout=(customTimeout or '15m'),
+    )
+    assert (MUT.VM.call_count == 2)
+    MUT.VM.CleanUpVMs.assert_called_once_with(wrappers, [
+        (clients[0], 'VirtualMachine/startup-0', 'uid-0'),
+        (clients[1], 'VirtualMachine/startup-1', 'uid-1'),
+    ], optsCleanUpRes={'optsDelRes': {
+        'waitTime': ('11m' if customTimeout else '3m'),
+    }})
 
 
 @pytest.mark.parametrize('failure', ['result', 'exception'])
@@ -1523,6 +1614,7 @@ def test_FxtVM_InitialSuccessUsesSelectedConfigAndCleansOnClose(
     MUT.VM.CleanUpVMs.assert_called_once_with(
         bundle.vmList,
         [(oc, 'VirtualMachine/initial', 'initial-uid')],
+        optsCleanUpRes={'optsDelRes': {'waitTime': '3m'}},
     )
 
 
@@ -1561,7 +1653,9 @@ def test_FxtVM_PerCallReturnsAreAggregatedAcrossBatches(
     bundle = next(generator)
 
     firstBatch = bundle.vmCreate(
-        fxtInf=NamedDict(vmCfg=NamedDict(count=1, namePfx='first')),
+        fxtInf=NamedDict(vmCfg=NamedDict(
+            count=1, namePfx='first', timeout=NamedDict(vmRemove='71s'),
+        )),
     )
     secondBatch = bundle.vmCreate(
         fxtInf=NamedDict(vmCfg=NamedDict(count=2, namePfx='second')),
@@ -1575,7 +1669,86 @@ def test_FxtVM_PerCallReturnsAreAggregatedAcrossBatches(
         (ocFactory.return_value, 'VirtualMachine/first', 'owned-uid'),
         (ocFactory.return_value, 'VirtualMachine/second-0', 'owned-uid'),
         (ocFactory.return_value, 'VirtualMachine/second-1', 'owned-uid'),
-    ])
+    ], optsCleanUpRes={'optsDelRes': {'waitTime': '3m'}})
+
+
+@pytest.mark.usefixtures('localPreparation')
+@pytest.mark.parametrize('moduleName, cfgName, default', [
+    ('VM', 'vmCfg', '3m'), ('BenchmarkRunner', 'brCfg', '5m'),
+])
+@pytest.mark.parametrize('vmRemove', [None, '420s'])
+@pytest.mark.parametrize('phase', ['normal', 'setup', 'later', 'body'])
+@pytest.mark.parametrize('cleanupFails', [False, True])
+def test_FxtVM_RemovalTimeoutUsesInitialConfigAcrossFailurePaths(
+    monkeypatch: pytest.MonkeyPatch,
+    moduleName: str,
+    cfgName: str,
+    default: str,
+    vmRemove: str | None,
+    phase: str,
+    cleanupFails: bool,
+) -> None:
+    module = importlib.import_module(f'fixtures.{moduleName}')
+    cfg = NamedDict(count=0)
+    if vmRemove: cfg |= NamedDict(timeout=NamedDict(vmRemove=vmRemove))
+    requestCfg = {'fxtInf': NamedDict({cfgName: cfg})}
+    before = ConfigSnapshot(requestCfg)
+    defaultsBefore = json.loads(json.dumps(module._DEF__FXT_CFG, default=str))
+    factoryName = 'VMcreate' if (moduleName == 'VM') else 'VMcreateByBR'
+    fixtureName = 'FxtVM' if (moduleName == 'VM') else 'FxtVMbyBR'
+    primary = RuntimeError('primary fixture failure')
+    secondary = RuntimeError('cleanup fixture failure')
+    owned = (mock.Mock(), 'VirtualMachine/owned', 'owned-uid')
+    wrapper = mock.Mock()
+    calls = []
+
+    def Create(request: Any, fPars: Any, **options: Any) -> list[Any]:
+        calls.append(fPars)
+        if (len(calls) == 1):
+            assert (fPars.fxtCfgObj.fxtInf[cfgName].timeout.vmStart == '15m')
+            assert (fPars.fxtCfgObj.fxtInf[cfgName].timeout.vmRemove == (
+                vmRemove or default
+            ))
+            fPars.ownResTrk.VMs.append(owned)
+            fPars.vmList.append(wrapper)
+        if ((phase == 'setup') or (len(calls) > 1)): raise primary
+        return [wrapper]
+
+    monkeypatch.setattr(module, factoryName, Create)
+    cleanup = mock.Mock(side_effect=(secondary if cleanupFails else None))
+    monkeypatch.setattr(module.VM, 'CleanUpVMs', cleanup)
+    generator = getattr(module, fixtureName).__wrapped__(
+        Request(requestCfg), mock.Mock(), mock.Mock(),
+    )
+    if (phase == 'setup'):
+        with pytest.raises(RuntimeError) as raised: next(generator)
+        assert (raised.value is primary)
+    else:
+        bundle = next(generator)
+        if (phase == 'later'):
+            with pytest.raises(RuntimeError) as raised:
+                bundle.vmCreate(fxtInf=NamedDict({cfgName: NamedDict(
+                    timeout=NamedDict(vmRemove='1s'),
+                )}))
+            assert (raised.value is primary)
+        if (phase == 'body'):
+            with pytest.raises(RuntimeError) as raised:
+                generator.throw(primary)
+            assert (raised.value is primary)
+        elif cleanupFails:
+            with pytest.raises(RuntimeError) as raised: next(generator)
+            assert (raised.value is secondary)
+        else:
+            with pytest.raises(StopIteration): next(generator)
+    cleanup.assert_called_once_with(
+        [wrapper], [owned],
+        optsCleanUpRes={'optsDelRes': {'waitTime': (vmRemove or default)}},
+    )
+    assert (ConfigSnapshot(requestCfg) == before)
+    assert (
+        json.loads(json.dumps(module._DEF__FXT_CFG, default=str)) ==
+        defaultsBefore
+    )
 
 
 @pytest.mark.usefixtures('localPreparation')
@@ -1700,6 +1873,7 @@ def test_FxtVM_PreyieldPartialFailureCleansCreatedVMs(
         [
             (ocZero, 'VirtualMachine/preyield-0', 'uid-zero'),
         ],
+        optsCleanUpRes={'optsDelRes': {'waitTime': '3m'}},
     )
     MUT.VM.assert_called_once()
     assert (MUT.VM.call_args.kwargs['name'] == 'preyield-0')
@@ -1757,6 +1931,7 @@ def test_FxtVM_PostyieldPartialFailureCleansCreatedVMsOnClose(
         [
             (ocZero, 'VirtualMachine/postyield-0', 'uid-zero'),
         ],
+        optsCleanUpRes={'optsDelRes': {'waitTime': '3m'}},
     )
 
 
@@ -1852,6 +2027,31 @@ def Create(state: SimpleNamespace) -> tuple[list[Any], list[Any]]:
         ),
     )
     return (result, ownVMs)
+
+
+@pytest.mark.parametrize('phase', [
+    'start-false', 'start-exception', 'ready-false',
+])
+def test_FxtVM_StartupCommandFailuresCleanOwnedResources(
+    localContext: SimpleNamespace,
+    phase: str,
+) -> None:
+    state = localContext
+    state.fail = phase
+    callbacks = []
+    state.request.addfinalizer = callbacks.append
+    with pytest.raises(RuntimeError): Create(state)
+    assert state.present
+    starts = [command for command in state.commands if ('start' in command)]
+    assert (len(starts) == 1)
+    assert (starts[0][starts[0].index('-n') + 1] == state.cfg['ns'])
+    ready = [command for command in state.commands
+             if ('condition=Ready' in command)]
+    assert (len(ready) == (1 if (phase == 'ready-false') else 0))
+    if ready:
+        assert (ready[0][ready[0].index('--timeout') + 1] == '15m')
+    for close in callbacks: close()
+    assert (state.present == {})
 
 
 def test_VMcreate_NativeSecretFilesPreserveNormalizedNUL(
@@ -3253,8 +3453,12 @@ def test_FxtVM_DirectoryCleanupFailurePreservesPrimaryAndSanitizesLogs(
     cleanupErrors = []
     nativeCleanupVMs = MUT.VM.CleanUpVMs
 
-    def CleanUpVMs(vmList: list[Any], ownVMs: list[Any]) -> None:
-        try: nativeCleanupVMs(vmList, ownVMs)
+    def CleanUpVMs(
+        vmList: list[Any],
+        ownVMs: list[Any],
+        **options: Any,
+    ) -> None:
+        try: nativeCleanupVMs(vmList, ownVMs, **options)
         except Exception as error:
             cleanupErrors.append(error)
             raise
@@ -3888,7 +4092,10 @@ def test_VMcreate_InvalidPublicOverridePreservesPreparedFixtureAndRetries(
     finally:
         generator.close()
     cleanup.assert_called_once()
-    cleanup.assert_called_once_with(bundle.vmList, owned)
+    cleanup.assert_called_once_with(
+        bundle.vmList, owned,
+        optsCleanUpRes={'optsDelRes': {'waitTime': '3m'}},
+    )
     assert (not directory.exists() and state.keyPath.is_file())
 
 
@@ -4814,9 +5021,13 @@ def test_FxtVM_MultipleOwnedDirectoriesFollowAllSSHCleanupAndPreservePrimary(
     nativeCleanupVMs = MUT.VM.CleanUpVMs
     cleanupErrors = []
 
-    def CleanupVMs(vmList: list[Any], ownVMs: list[Any]) -> None:
+    def CleanupVMs(
+        vmList: list[Any],
+        ownVMs: list[Any],
+        **options: Any,
+    ) -> None:
         try:
-            nativeCleanupVMs(vmList, ownVMs)
+            nativeCleanupVMs(vmList, ownVMs, **options)
         except Exception as error:
             cleanupErrors.append(error)
             raise

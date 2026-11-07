@@ -23,11 +23,11 @@ to the blockers above.
 
 ## Fixture API
 
-Workload selection is nested under `fxtInf.brCfg`, with `workloadName='windows'`
-and `workloadKind='vm'` defaults. Override it with, for example,
-`fxtVMbyBR.vmCreate(fxtInf=NamedDict(brCfg=NamedDict(workloadName='windows_scale')))`, using
+Workload selection is nested under `fxtInf.brCfg`, with `wlName='windows'`
+and `wlKind='vm'` defaults. Override it with, for example,
+`fxtVMbyBR.vmCreate(fxtInf=NamedDict(brCfg=NamedDict(wlName='windows_scale')))`, using
 `from libs.CustomTypes import NamedDict` as with other nested overrides.
-Top-level `count`, `workloadName`, and `workloadKind` overrides are no longer used.
+Top-level `count`, `wlName`, and `wlKind` overrides are not used.
 
 The module-scoped `fxtVMbyBR` fixture yields a frozen `FxtObjVMbyBR` bundle. Its `vmList` field holds every VM wrapper
 managed by the fixture. Its `vmCreate` field is a callable that accepts the same configuration as the fixture, creates

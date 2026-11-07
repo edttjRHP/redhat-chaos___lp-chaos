@@ -50,8 +50,11 @@ _DEF__FXT_CFG = NamedDict(
         ),
         brCfg=NamedDict(
             count=1,
-            workloadName='windows',
-            workloadKind='vm',
+            startVM=True,
+            wlName='windows',
+            wlKind='vm',
+            brEnv={},
+            timeout=NamedDict(vmStart='15m', vmRemove='5m'),
         ),
         gstCfg=NamedDict(
             usrCrd=NamedDict(
@@ -126,18 +129,17 @@ def VMcreateByBR(
     newVMs = []
 
     logs.info(f'Creating {vmCount} VM(s) via benchmark-runner')
-    workload = (
-        f'{fxtCfg.fxtInf.brCfg.workloadName}_'
-        f'{fxtCfg.fxtInf.brCfg.workloadKind}'
-    )
+    workload = f'{fxtCfg.fxtInf.brCfg.wlName}_{fxtCfg.fxtInf.brCfg.wlKind}'
     invocationUUID = str(uuid4())
     truncUUID = invocationUUID.split('-')[0]
     env = {
+        **fxtCfg.fxtInf.brCfg.brEnv,
         'KUBECONFIG': fxtCfg.kCfg,
         'WORKLOAD': workload,
         'RUN_TYPE': 'test_ci',
         'NAMESPACE': ns,
         'DELETE_ALL': 'no',
+        'SAVE_ARTIFACTS_LOCAL': 'true',
         'RUN_ARTIFACTS_PATH': (
             os.environ.get('RUN_ARTIFACTS_PATH') or tempfile.mkdtemp()
         ),
@@ -240,6 +242,11 @@ def VMcreateByBR(
             sshKey=sshKey,
         ))
         fPars.vmList.append(newVMs[-1])
+        if fxtCfg.fxtInf.brCfg.startVM:
+            if not newVMs[-1].Start(
+                timeout=fxtCfg.fxtInf.brCfg.timeout.vmStart,
+            ):
+                raise RuntimeError(f'VM `{ns}/{vmName}` failed to start.')
 
     return newVMs
 
@@ -276,12 +283,18 @@ def FxtVMbyBR(
                   - br: Location where `benchmark-runner` is installed.
               - brCfg:
                 BenchmarkRunner workload configurations:
-                  - count:  Number of VMs to create (default: `1`).
-                  - workloadName:
+                  - count:      Number of VMs to create (default: `1`).
+                  - startVM:    Start each VM (default: `True`).
+                  - wlName:
                     Template directory name inside `benchmark-runner`
                     (default: `'windows'`).
-                  - workloadKind:
+                  - wlKind:
                     Resource kind suffix (default: `'vm'`).
+                  - timeout:
+                      - vmStart:
+                        The `timeout` par. for `VM.Start()` (default: `'15m'`).
+                      - vmRemove:
+                        VM deletion wait at fixture teardown (default: `'5m'`).
               - gstCfg:
                 Guest System configurations:
                   - usrCrd:
@@ -320,7 +333,14 @@ def FxtVMbyBR(
     finally:
         primExc = sys.exc_info()[1]
         try:
-            if (vmList or ownResTrk.VMs): VM.CleanUpVMs(vmList, ownResTrk.VMs)
+            if (vmList or ownResTrk.VMs):
+                VM.CleanUpVMs(
+                    vmList,
+                    ownResTrk.VMs,
+                    optsCleanUpRes={'optsDelRes': {
+                        'waitTime': fxtCfg.fxtInf.brCfg.timeout.vmRemove,
+                    }},
+                )
         except Exception as error:
             logs.error('Could not clean up fixture VMs: %s', error)
             if ((primExc is None) or isinstance(primExc, GeneratorExit)): raise

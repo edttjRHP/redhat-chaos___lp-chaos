@@ -39,8 +39,10 @@ class CmdExec:
         '''
         Run a command locally with optional retry and stdin piping.
 
-        :param command: Command to execute (see `subprocess` for details).
-        :param shell:   True to run via shell wrapper (use with caution).
+        :param command:
+            Command to execute (see `subprocess` for details).
+        :param shell:
+            Set to `True` to run via shell wrapper (use with caution).
         :param input:
             Optional string, piped to the process's standard input, passed
             through `to subprocess.run()`.
@@ -51,7 +53,8 @@ class CmdExec:
         :param warnOnFail:
             Log non-zero exit code warning (default: `True`). Set to `False` to
             suppresses the warning.
-        :param tryMax:  Override the default maximum number of attempts.
+        :param tryMax:
+            Override the default maximum number of attempts.
         :param spPars:
             Optional `dict` of extra keyword arguments passed through
             to `subprocess.run()` (e.g. `{'timeout': 30, 'env': myEnv}`).

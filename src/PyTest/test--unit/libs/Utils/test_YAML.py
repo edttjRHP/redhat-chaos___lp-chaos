@@ -13,9 +13,7 @@ from fixtures.libs.VM import PresetCtx
 import Utils
 
 
-VM_TEMPLATE = (
-    Path(__file__).parents[3] / 'conf' / 'config--vm--template.yaml'
-)
+VM_TEMPLATE = Path(__file__).parents[3] / 'conf/VM/cfg-template--vm.yaml'
 VM_SOURCE = {
     's3': {
         'secretRef': 'synthetic-image-source',

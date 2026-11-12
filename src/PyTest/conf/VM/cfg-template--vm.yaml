@@ -1,4 +1,6 @@
 {#-
+# Windows VM template; see docs/guide--vm.md for custom templates and defaults.
+# fxtVM supplies the image source, guest key, VM name, and namespace.
 # Required caller context (camelCase):
 #   - vmDataVolumeSource:
 #       A non-empty mapping containing a valid CDI `DataVolume.spec.source`.

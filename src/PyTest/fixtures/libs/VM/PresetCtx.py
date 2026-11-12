@@ -1,10 +1,9 @@
-'''VM Fixture Model Contexts (Presets) for Chaos Testing.'''
+'''Optional VM template contexts.'''
 import os
 
-from libs.CustomTypes import NamedDict
 
-# Base configuration applied to all VM scenarios.
-modelBase = NamedDict(
+# Guest OS Windows.
+modelGstOSwin = dict(
     vmCpuCores=4,
     vmMemory='8Gi',
     vmStorageClass=os.getenv(
@@ -21,7 +20,7 @@ modelBase = NamedDict(
 )
 
 # Node CPU/Memory/IO Hog scenario.
-modelNodeHog = modelBase | NamedDict(
+modelNodeHog = dict(
     vmCpuCores=8,
     vmMemory='16Gi',
     vmNodeSelector={
@@ -36,7 +35,7 @@ modelNodeHog = modelBase | NamedDict(
 )
 
 # Migration scenario.
-modelMigrationStorm = modelBase | NamedDict(
+modelMigrationStorm = dict(
     vmStorageAccessModes=['ReadWriteMany'],
     vmEvictionStrategy='LiveMigrate',
 )

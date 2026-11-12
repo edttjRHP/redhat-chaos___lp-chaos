@@ -16,6 +16,18 @@ from libs.CustomTypes import NamedDict
 from libs.Utils.CmdExec import CmdRes
 
 
+@pytest.fixture(name='fixtureRequest')
+def FixtureRequest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> SimpleNamespace:
+    options = tmp_path / 'conf/Krkn/opts--krkn.yaml'
+    options.parent.mkdir(parents=True)
+    options.write_text('sourceFile:\n  envVar: |\n    :\n')
+    monkeypatch.delenv('IENG_PYTEST____FXT__KRKN____OPTS', raising=False)
+    return SimpleNamespace(config=SimpleNamespace(rootpath=tmp_path))
+
+
 @pytest.mark.parametrize('scenario', [
     'test_VMsurvivesVirtLauncherKill',
     'test_HostSideKernelScanOnVMnode',
@@ -43,9 +55,12 @@ def test_FxtKrkn_ExamplesRemainSkippedHubPlaceholders(
 
 
 @pytest.mark.parametrize('field', [
-    'krknHub', 'krknInf', 'testPars', 'cli', 'ns',
+    'krknHub', 'fxtInf', 'testPars', 'cli', 'ns',
 ])
-def test_FxtKrkn_YieldsFrozenObjectWithMutableContents(field: str) -> None:
+def test_FxtKrkn_YieldsFrozenObjectWithMutableContents(
+    fixtureRequest: SimpleNamespace,
+    field: str,
+) -> None:
     krknPars = NamedDict(targets=[])
     fxtInf = NamedDict(
         rootPath=NamedDict(
@@ -56,28 +71,32 @@ def test_FxtKrkn_YieldsFrozenObjectWithMutableContents(field: str) -> None:
     testPars = NamedDict(vm='vm-one', results=[])
     ocFactory = mock.Mock()
     virtCtlFactory = mock.Mock()
+    fixtureRequest.param = {
+        'kCfg': '/synthetic/config', 'ns': 'custom-ns',
+        'cliCfg': NamedDict(
+            ocCfg={'context': 'oc-context'},
+            vcCfg={'kubeconfig': '/synthetic/virt-config'},
+        ),
+        'fxtInf': fxtInf, 'testPars': testPars,
+    }
     generator = MUT.FxtKrkn.__wrapped__(
-        request=SimpleNamespace(param={
-            'kCfg': '/synthetic/config', 'ns': 'custom-ns',
-            'cliCfg': NamedDict(
-                ocCfg={'context': 'oc-context'},
-                vcCfg={'kubeconfig': '/synthetic/virt-config'},
-            ),
-            'fxtInf': fxtInf, 'testPars': testPars,
-        }),
+        request=fixtureRequest,
         fxtOCcli=ocFactory, fxtVirtCtlCLI=virtCtlFactory,
     )
     try:
         context = next(generator)
         assert (isinstance(context, MUT.FxtObjKrkn))
         assert ({field.name for field in dataclasses.fields(context)} == {
-            'krknHub', 'krknInf', 'testPars', 'cli', 'ns',
+            'krknHub', 'fxtInf', 'testPars', 'cli', 'ns',
         })
         assert (isinstance(context.krknHub, MUT.KrknHub))
-        assert (context.krknHub.rootPath == Path('/synthetic/hub'))
-        assert (context.krknHub.krkn == Path('/synthetic/krkn/run_kraken.py'))
-        assert (context.krknHub.kCfg == '/synthetic/config')
-        assert (context.krknInf == krknPars)
+        config = context.krknHub.iPars.fxtCfgObj
+        assert (context.krknHub.request is fixtureRequest)
+        assert (config.fxtInf.rootPath.krknHub == Path('/synthetic/hub'))
+        assert (config.fxtInf.rootPath.krkn == Path('/synthetic/krkn'))
+        assert (config.kCfg == '/synthetic/config')
+        assert (context.fxtInf is config.fxtInf)
+        assert (context.fxtInf.krknCfg.targets is krknPars.targets)
         assert (context.testPars == testPars)
         assert (context.ns == 'custom-ns')
         assert (context.cli.oc is ocFactory.return_value)
@@ -90,10 +109,10 @@ def test_FxtKrkn_YieldsFrozenObjectWithMutableContents(field: str) -> None:
         with pytest.raises(dataclasses.FrozenInstanceError):
             setattr(context, field, object())
         assert (getattr(context, field) is original)
-        context.krknInf.targets.append('node-one')
+        context.fxtInf.krknCfg.targets.append('node-one')
         context.testPars.results.append('recovered')
         context.cli.oc.Run.return_value = 'running'
-        assert (context.krknInf.targets == ['node-one'])
+        assert (context.fxtInf.krknCfg.targets == ['node-one'])
         assert (context.testPars.results == ['recovered'])
         assert (context.cli.oc.Run() == 'running')
         with pytest.raises(StopIteration):
@@ -104,24 +123,22 @@ def test_FxtKrkn_YieldsFrozenObjectWithMutableContents(field: str) -> None:
 
 @pytest.mark.parametrize('hasRequestParam', [False, True])
 def test_FxtKrkn_UsesDefaultConfigurationWithAbsentOrEmptyRequestParam(
+    fixtureRequest: SimpleNamespace,
     hasRequestParam: bool,
 ) -> None:
-    request = (
-        SimpleNamespace(param={}) if hasRequestParam
-        else SimpleNamespace()
-    )
+    request = fixtureRequest
+    if hasRequestParam: request.param = {}
     ocFactory = mock.Mock()
     virtCtlFactory = mock.Mock()
     generator = MUT.FxtKrkn.__wrapped__(request, ocFactory, virtCtlFactory)
     try:
         context = next(generator)
         defaults = MUT._DEF__FXT_CFG
-        assert (context.krknHub.rootPath == defaults.fxtInf.rootPath.krknHub)
-        assert (context.krknHub.krkn == (
-            defaults.fxtInf.rootPath.krkn / 'run_kraken.py'
-        ))
-        assert (context.krknHub.kCfg == defaults.kCfg)
-        assert (context.krknInf == defaults.fxtInf.krknCfg)
+        config = context.krknHub.iPars.fxtCfgObj
+        assert (context.krknHub.request is request)
+        assert (config.fxtInf.rootPath == defaults.fxtInf.rootPath)
+        assert (config.kCfg == defaults.kCfg)
+        assert (context.fxtInf == defaults.fxtInf)
         assert (context.testPars == defaults.testPars)
         assert (context.ns == defaults.ns)
         assert (context.cli.oc is ocFactory.return_value)
@@ -135,12 +152,16 @@ def test_FxtKrkn_UsesDefaultConfigurationWithAbsentOrEmptyRequestParam(
 
 
 @pytest.mark.parametrize('failingCLI', ['oc', 'virtCtl'])
-def test_FxtKrkn_PropagatesCLIFactoryErrors(failingCLI: str) -> None:
+def test_FxtKrkn_PropagatesCLIFactoryErrors(
+    fixtureRequest: SimpleNamespace,
+    failingCLI: str,
+) -> None:
     factories = NamedDict(oc=mock.Mock(), virtCtl=mock.Mock())
     error = RuntimeError('synthetic factory failure')
     factories[failingCLI].side_effect = error
+    fixtureRequest.param = {'kCfg': 'fake-config'}
     generator = MUT.FxtKrkn.__wrapped__(
-        SimpleNamespace(param={'kCfg': 'fake-config'}),
+        fixtureRequest,
         factories.oc, factories.virtCtl,
     )
     with pytest.raises(RuntimeError) as raised:
@@ -152,13 +173,120 @@ def test_FxtKrkn_PropagatesCLIFactoryErrors(failingCLI: str) -> None:
         factories.virtCtl.assert_called_once_with(ns=MUT._DEF__FXT_CFG.ns)
 
 
-def test_Init_NormalizesHubRootAndPreservesScriptAndConfigPaths() -> None:
-    script = Path('/synthetic/run.py')
-    config = Path('/synthetic/config')
-    hub = MUT.KrknHub('/synthetic/hub', script, config)
-    assert (hub.rootPath == Path('/synthetic/hub'))
-    assert (hub.krkn == script)
-    assert (hub.kCfg is config)
+@pytest.mark.parametrize('customOptions', [False, True])
+@pytest.mark.parametrize('indirectOverride', [False, True])
+def test_FxtKrkn_ConvertsOptionsChainsAndMergesContentEnvironment(
+    fixtureRequest: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    customOptions: bool,
+    indirectOverride: bool,
+) -> None:
+    root = fixtureRequest.config.rootpath
+    options = root / 'conf/Krkn/opts--krkn.yaml'
+    if customOptions:
+        options = root / 'custom options.yaml'
+        monkeypatch.setenv('IENG_PYTEST____FXT__KRKN____OPTS', str(options))
+    script = (
+        'export KRKN_TEST_OPTS_SHARED=config\n'
+        'export KRKN_TEST_OPTS_ONLY="from content"\n'
+        'unset KRKN_TEST_OPTS_REMOVE\n'
+    )
+    options.write_text(
+        'sourceFile:\n  envVar: |\n' +
+        ''.join(f'    {line}\n' for line in script.splitlines()) +
+        'blocked:\n  - not-valid: retained\n'
+    )
+    monkeypatch.setenv('KRKN_TEST_OPTS_REMOVE', 'parent')
+    monkeypatch.setenv('KRKN_TEST_OPTS_SHARED', 'parent')
+    monkeypatch.delenv('KRKN_TEST_OPTS_ONLY', raising=False)
+    monkeypatch.chdir(root.parent)
+    originalParse = MUT.YAMLcfg.ToDict
+    originalConvert = NamedDict.FromDict
+    parsed = []
+    converted = []
+    modes = []
+
+    def Parse(text: str) -> dict:
+        data = originalParse(text)
+        data['paired'] = ({'not-valid': 'retained'},)
+        parsed.append(data)
+        return data
+
+    def Convert(
+        data: dict,
+        mode: NamedDict.NestedMode = NamedDict.NestedMode.CHAIN,
+    ) -> NamedDict:
+        modes.append(mode)
+        result = originalConvert(data, mode)
+        converted.append(result)
+        return result
+
+    parseSpy = mock.Mock(side_effect=Parse)
+    convertSpy = mock.Mock(side_effect=Convert)
+    deltaSpy = mock.Mock(wraps=MUT.GetEnvDelta)
+    monkeypatch.setattr(MUT.YAMLcfg, 'ToDict', parseSpy)
+    monkeypatch.setattr(NamedDict, 'FromDict', convertSpy)
+    monkeypatch.setattr(MUT, 'GetEnvDelta', deltaSpy)
+    if indirectOverride:
+        fixtureRequest.param = {'fxtInf': NamedDict(krknCfg=NamedDict(
+            krknEnv={
+                'KRKN_TEST_OPTS_SHARED': 'indirect',
+                'KRKN_TEST_OPTS_ONLY': None,
+            },
+        ))}
+    beforeEnv = dict(os.environ)
+    defaults = MUT._DEF__FXT_CFG.ToDict(NamedDict.NestedMode.ALL)
+    generator = MUT.FxtKrkn.__wrapped__(
+        fixtureRequest, mock.Mock(), mock.Mock(),
+    )
+    try:
+        context = next(generator)
+        parseSpy.assert_called_once_with(options.read_text())
+        convertSpy.assert_called_once()
+        assert (convertSpy.call_args.args[0] is parsed[0])
+        assert (modes == [NamedDict.NestedMode.CHAIN])
+        assert (type(converted[0]) is NamedDict)
+        assert (type(converted[0].sourceFile) is NamedDict)
+        assert (converted[0].sourceFile.envVar == script)
+        assert (converted[0].sourceFile is not parsed[0]['sourceFile'])
+        assert (type(parsed[0]['sourceFile']) is dict)
+        assert (converted[0].blocked is parsed[0]['blocked'])
+        assert (converted[0].paired is parsed[0]['paired'])
+        assert (type(converted[0].blocked[0]) is dict)
+        assert (type(converted[0].paired[0]) is dict)
+        deltaSpy.assert_called_once()
+        (shellClass, streams) = deltaSpy.call_args.args
+        assert (shellClass is MUT.BashEnv)
+        assert (len(streams) == 1)
+        assert (isinstance(streams[0], MUT.StringIO))
+        assert (streams[0].getvalue() == script)
+        expected = {
+            **defaults['fxtInf']['krknCfg']['krknEnv'],
+            'KRKN_TEST_OPTS_SHARED': 'config',
+            'KRKN_TEST_OPTS_ONLY': 'from content',
+            'KRKN_TEST_OPTS_REMOVE': None,
+        }
+        if indirectOverride:
+            expected.update({
+                'KRKN_TEST_OPTS_SHARED': 'indirect',
+                'KRKN_TEST_OPTS_ONLY': None,
+            })
+        assert (context.fxtInf.krknCfg.krknEnv == expected)
+        assert (MUT._DEF__FXT_CFG.ToDict(NamedDict.NestedMode.ALL) == defaults)
+        assert (dict(os.environ) == beforeEnv)
+        with pytest.raises(StopIteration): next(generator)
+    finally:
+        generator.close()
+
+
+def test_Init_PreservesRequestAndInstanceParameters() -> None:
+    request = SimpleNamespace()
+    config = NamedDict(kCfg=Path('/synthetic/config'))
+    parameters = MUT.InstParsKrknHub(fxtCfgObj=config)
+    hub = MUT.KrknHub(request, parameters)
+    assert (hub.request is request)
+    assert (hub.iPars is parameters)
+    assert (hub.iPars.fxtCfgObj is config)
 
 
 @pytest.fixture(name='hubContext')
@@ -208,13 +336,18 @@ def HubContext(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> NamedDict:
         'import os, sys\n'
         'from pathlib import Path\n'
         'observed = (Path.cwd(), sys.argv[1:], __name__,\n'
-        '            os.getenv("KUBECONFIG"),\n'
+        '            os.getenv("KRKN_KUBE_CONFIG"),\n'
         '            os.getenv("KRKN_TEST_REMOVE"),\n'
         '            os.getenv("KRKN_TEST_ORDER"))\n'
         'os.environ["KRKN_TEST_ADDED"] = "temporary"\n'
     )
+    config = MUT._DEF__FXT_CFG | NamedDict(
+        kCfg='fake-config', fxtInf=NamedDict(rootPath=NamedDict(
+            krkn=krknRoot, krknHub=kHubRoot,
+        )),
+    )
     return NamedDict(
-        hub=MUT.KrknHub(kHubRoot, script, 'fake-config'),
+        hub=MUT.KrknHub(None, MUT.InstParsKrknHub(fxtCfgObj=config)),
         kHubRoot=kHubRoot, scnDir=scnDir, krknRoot=krknRoot, script=script,
         scnFile=runDir / 'scenarios/synthetic.yaml',
         cfgFile=runDir / 'config/chaos.yaml',
@@ -224,7 +357,7 @@ def HubContext(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> NamedDict:
 
 @pytest.mark.parametrize('debug', [None, 'False', 'True', 'true', '1'])
 @pytest.mark.parametrize('overrides', [None, {}, {
-    'KUBECONFIG': 'override-config', 'KRKN_TEST_ORDER': 7,
+    'KRKN_KUBE_CONFIG': 'override-config', 'KRKN_TEST_ORDER': 7,
     'KRKN_TEST_REMOVE': None,
 }])
 def test_Run_RendersSelectedTemplatesAndPreservesDispatchContract(
@@ -255,13 +388,17 @@ def test_Run_RendersSelectedTemplatesAndPreservesDispatchContract(
     ])
     runner.assert_called_once_with(
         context.script, args,
-        {'KUBECONFIG': 'fake-config', **(overrides or {})},
+        {
+            'KRKN_KUBE_CONFIG': 'fake-config',
+            **context.hub.iPars.fxtCfgObj.fxtInf.krknCfg.krknEnv,
+            **(overrides or {}),
+        },
         initialGlobals, 'synthetic_run',
     )
     assert (result['injected'] is initialGlobals['injected'])
     assert (result['observed'] == (
         context.runDir, args, 'synthetic_run',
-        (overrides or {}).get('KUBECONFIG', 'fake-config'), None,
+        (overrides or {}).get('KRKN_KUBE_CONFIG', 'fake-config'), None,
         '7' if overrides else 'root-scenario',
     ))
     assert (context.scnFile.read_text() == (
@@ -441,17 +578,18 @@ def test_Run_PreservesInjectedExceptionIdentity(
     assert (sys.executable == beforePython)
 
 
-def test_Init_ResolvesRelativeRunnerBeforeChangingDirectory(
+def test_Run_ResolvesRelativeRunnerBeforeChangingDirectory(
     hubContext: NamedDict,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = hubContext
     monkeypatch.chdir(context.krknRoot.parent)
-    hub = MUT.KrknHub(
-        context.kHubRoot, 'krkn root/run_kraken.py', 'fake-config',
+    result = context.hub.Run(
+        'pod-scenarios', krknScr='run_kraken.py',
+        fxtInf=NamedDict(rootPath=NamedDict(
+            krkn=Path('krkn root'), krknHub=Path('hub root'),
+        )),
     )
-    assert (hub.krkn == context.script)
-    result = hub.Run('pod-scenarios')
     assert (result['observed'][0] == context.runDir)
 
 
@@ -617,6 +755,107 @@ def test_Run_UsesByteCapturingCmdExec(hubContext: NamedDict) -> None:
         context.hub.Run('pod-scenarios')
     assert (factory.call_count == 2)
     assert (context.scnFile.read_bytes().startswith(b'value: "root-scenario"'))
+
+
+def test_Run_SeedsEnvironmentBeforeSourcingAndKeepsRunnerOverrides(
+    hubContext: NamedDict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = hubContext
+    with (context.kHubRoot / 'env.sh').open('a') as envFile:
+        envFile.write(
+            'export KRKN_TEST_FROM_CONFIG=$KRKN_TEST_SEED\n'
+            'export KRKN_TEST_SEED=hub\n'
+        )
+    with (context.scnDir / 'env.sh').open('a') as envFile:
+        envFile.write('export KRKN_TEST_SEED="${KRKN_TEST_SEED}-scenario"\n')
+    with (context.scnDir / 'selected.yaml.template').open('a') as template:
+        template.write('$KRKN_TEST_FROM_CONFIG/$KRKN_TEST_SEED\n')
+    with context.script.open('a') as script:
+        script.write(
+            'seed = os.getenv("KRKN_TEST_SEED")\n'
+            'removed = os.getenv("KRKN_TEST_REMOVE")\n'
+        )
+    originalSource = MUT.DoShellSource
+
+    def Source(**kwArgs: object) -> None:
+        assert (os.environ['KRKN_TEST_SEED'] == 'config')
+        assert ('KRKN_TEST_REMOVE' not in os.environ)
+        originalSource(**kwArgs)
+
+    monkeypatch.setattr(MUT, 'DoShellSource', Source)
+    beforeEnv = dict(os.environ)
+    config = NamedDict(krknCfg=NamedDict(krknEnv={
+        'KRKN_TEST_SEED': 'config', 'KRKN_TEST_REMOVE': None,
+    }))
+    result = context.hub.Run(
+        'pod-scenarios', {'KRKN_TEST_SEED': 'explicit'}, fxtInf=config,
+    )
+    assert (context.scnFile.read_text().endswith('config/hub-scenario\n'))
+    assert (result['seed'] == 'explicit')
+    assert (result['removed'] is None)
+    assert (dict(os.environ) == beforeEnv)
+
+
+@pytest.mark.parametrize('preparation', [
+    'absent', 'success', 'nonzero', 'notExecutable',
+])
+def test_Run_PreparesBeforeRunnerAndPropagatesFailures(
+    hubContext: NamedDict,
+    monkeypatch: pytest.MonkeyPatch,
+    preparation: str,
+) -> None:
+    context = hubContext
+    marker = context.scnDir / 'prepared'
+    prepFile = context.scnDir / 'prep.sh'
+    if (preparation != 'absent'):
+        prepFile.write_text(
+            '#!/bin/sh\n'
+            f'printf "%s" "$KRKN_TEST_ORDER" > {shlex.quote(str(marker))}\n'
+            'export KRKN_TEST_ORDER=child-only\n' +
+            ('echo synthetic-prep-error >&2\nexit 7\n'
+             if (preparation == 'nonzero') else 'exit 0\n')
+        )
+        prepFile.chmod(0o644 if (preparation == 'notExecutable') else 0o755)
+    originalRunner = MUT.RunFromPath
+
+    def Run(*args: object) -> dict:
+        if (preparation == 'success'):
+            assert (marker.read_text() == 'root-scenario')
+        assert (context.cfgFile.is_file())
+        assert (context.scnFile.is_file())
+        return originalRunner(*args)
+
+    runner = mock.Mock(side_effect=Run)
+    executor = mock.Mock(wraps=MUT.CmdExec().Run)
+    monkeypatch.setattr(MUT, 'RunFromPath', runner)
+    monkeypatch.setattr(MUT.CmdExec, 'Run', executor)
+    beforeEnv = dict(os.environ)
+    beforeCwd = Path.cwd()
+    if (preparation in ('nonzero', 'notExecutable')):
+        exitStat = 7 if (preparation == 'nonzero') else -2
+        with pytest.raises(
+            RuntimeError, match=f'`prep.sh` failed \\({exitStat}\\)',
+        ) as raised:
+            context.hub.Run('pod-scenarios')
+        detail = (
+            'synthetic-prep-error' if (preparation == 'nonzero')
+            else 'Permission denied'
+        )
+        assert (detail in str(raised.value))
+        runner.assert_not_called()
+    else:
+        result = context.hub.Run('pod-scenarios')
+        runner.assert_called_once()
+        assert (result['observed'][-1] == 'root-scenario')
+    assert (executor.call_count == (2 if (preparation == 'absent') else 3))
+    if (preparation != 'absent'):
+        assert (executor.call_args == mock.call([str(prepFile)]))
+    if (preparation in ('success', 'nonzero')):
+        assert (marker.read_text() == 'root-scenario')
+    else: assert not marker.exists()
+    assert (dict(os.environ) == beforeEnv)
+    assert (Path.cwd() == beforeCwd)
 
 
 def test_Run_AcceptsScnNameKeyword(hubContext: NamedDict) -> None:

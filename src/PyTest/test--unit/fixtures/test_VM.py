@@ -255,7 +255,7 @@ def test_FuncParsVMcreate_OwnershipTypesUseConcreteCLI(
 
 def test__DEF__FXT_CFG_UsesNestedVMConfiguration() -> None:
     cfg = MUT._DEF__FXT_CFG
-    assert (cfg.fxtInf.vmCfg.cfgFile == 'config--vm--template.yaml')
+    assert (cfg.fxtInf.vmCfg.cfgTmpl == 'cfg-template--vm.yaml')
     assert (type(cfg.fxtInf.vmCfg.ctxData) is dict)
     assert (cfg.fxtInf.vmCfg.ctxData == {})
     assert (cfg.fxtInf.vmCfg.timeout == NamedDict(
@@ -263,6 +263,38 @@ def test__DEF__FXT_CFG_UsesNestedVMConfiguration() -> None:
     ))
     assert ('configFile' not in cfg)
     assert ('timeout' not in cfg)
+
+
+@pytest.mark.usefixtures('localPreparation')
+@pytest.mark.parametrize('cfgTmpl, expected', [
+    ('custom.yaml', '/repo/conf/VM/custom.yaml'),
+    ('nested/custom.yaml', '/repo/conf/VM/nested/custom.yaml'),
+    ('/absolute/custom.yaml', '/absolute/custom.yaml'),
+])
+@pytest.mark.parametrize('perCall', [False, True])
+def test_VMcreate_ResolvesCustomTemplateFromRequestRoot(
+    monkeypatch: pytest.MonkeyPatch,
+    cfgTmpl: str,
+    expected: str,
+    perCall: bool,
+) -> None:
+    Utils.AutoPatch(monkeypatch, MUT.YAMLcfg, 'Render')
+    Utils.AutoPatch(monkeypatch, MUT.Namespace, 'Create')
+    Utils.AutoPatch(monkeypatch, MUT.Secret, 'Create')
+    MUT.YAMLcfg.Render.side_effect = OSError('synthetic render stop')
+    config = NamedDict(fxtInf=NamedDict(vmCfg=NamedDict(cfgTmpl=cfgTmpl)))
+    base = MUT._DEF__FXT_CFG | (NamedDict() if perCall else config)
+    overrides = config if perCall else NamedDict()
+    client = OCmock()
+    client.GetResUID.return_value = (True, '', '')
+    with pytest.raises(OSError, match='synthetic render stop'):
+        MUT.VMcreate(
+            Request(), MUT.FuncParsVMcreate(fxtCfgObj=base),
+            ocCLI=mock.Mock(return_value=client), virtCtlCLI=mock.Mock(),
+            **overrides,
+        )
+    MUT.YAMLcfg.Render.assert_called_once_with(Path(expected), mock.ANY)
+    client.vmNewRes.assert_not_called()
 
 
 @pytest.mark.usefixtures('localPreparation')
@@ -332,7 +364,7 @@ def test_VMcreate_ContextMergesCustomFieldsAndGeneratesManagedFields(
     }
     assert (MUT.YAMLcfg.Render.call_args_list == [
         mock.call(
-            Path('/repo/conf/config--vm--template.yaml'),
+            Path('/repo/conf/VM/cfg-template--vm.yaml'),
             {**expected, 'vmName': (
                 f'custom-{index}' if (count > 1) else 'custom'
             )},
@@ -1202,7 +1234,7 @@ def test_VMcreate_BatchReturnsNewVMsAndAppendsConfirmedOwnership(
                 timeout=NamedDict(vmCreate='4m'),
                 count=2,
                 namePfx='unit',
-                cfgFile='template.yaml',
+                cfgTmpl='template.yaml',
             ),
             gstCfg=NamedDict(usrCrd=NamedDict(sshUsr='unit-user')),
         ),
@@ -1215,8 +1247,8 @@ def test_VMcreate_BatchReturnsNewVMsAndAppendsConfirmedOwnership(
         (ocOne, 'VirtualMachine/unit-1', 'uid-one'),
     ])
     assert (MUT.YAMLcfg.Render.call_args_list == [
-        mock.call(Path('/repo/conf/template.yaml'), mock.ANY),
-        mock.call(Path('/repo/conf/template.yaml'), mock.ANY),
+        mock.call(Path('/repo/conf/VM/template.yaml'), mock.ANY),
+        mock.call(Path('/repo/conf/VM/template.yaml'), mock.ANY),
     ])
     assert (ocFactory.call_args_list == [
         mock.call(ns='default', context='oc-context'),
@@ -1587,7 +1619,7 @@ def test_FxtVM_InitialSuccessUsesSelectedConfigAndCleansOnClose(
                 vmCfg=NamedDict(
                     count=1,
                     namePfx='initial',
-                    cfgFile='initial.yaml',
+                    cfgTmpl='initial.yaml',
                 ),
             ),
         }),
@@ -1607,7 +1639,7 @@ def test_FxtVM_InitialSuccessUsesSelectedConfigAndCleansOnClose(
         kubeconfig='/initial-config',
     )
     MUT.YAMLcfg.Render.assert_called_once_with(
-        Path('/repo/conf/initial.yaml'),
+        Path('/repo/conf/VM/initial.yaml'),
         mock.ANY,
     )
     generator.close()
@@ -2684,7 +2716,7 @@ def test_VMcreate_RenderFailureLeavesSecretOwnedForFixtureCleanup(
     localContext: SimpleNamespace,
 ) -> None:
     state = localContext
-    state.cfg['fxtInf']['vmCfg']['cfgFile'] = 'missing-template.yaml'
+    state.cfg['fxtInf']['vmCfg']['cfgTmpl'] = 'missing-template.yaml'
     with pytest.raises(FileNotFoundError, match='Template file not found'):
         Create(state)
     assert (state.keyCalls == 1)
@@ -3194,7 +3226,7 @@ def test_FxtVM_OwnedKeyFilesRemovedAfterFailure(
     if (failure == 'create'):
         state.cfg = state.request.param
         state.request.param = state.request.param + {
-            'fxtInf': NamedDict(vmCfg=NamedDict(cfgFile='missing')),
+            'fxtInf': NamedDict(vmCfg=NamedDict(cfgTmpl='missing')),
         }
     if (failure in ('generate', 'create')):
         with pytest.raises((ValueError, OSError)):
@@ -3207,7 +3239,7 @@ def test_FxtVM_OwnedKeyFilesRemovedAfterFailure(
                     fxtInf=NamedDict(
                         vmCfg=NamedDict(
                             namePfx='failed-later',
-                            cfgFile='missing',
+                            cfgTmpl='missing',
                         ),
                     ),
                 )
@@ -3606,53 +3638,10 @@ def test_VMcreate_EmptyRenderLeavesSecretOwnedForFixtureCleanup(
     state = localContext
     template = state.keyPath.parent / 'empty.yaml'
     template.write_text(' \n')
-    state.cfg['fxtInf']['vmCfg']['cfgFile'] = str(template)
-    with pytest.raises(ValueError, match='cfgFile'):
+    state.cfg['fxtInf']['vmCfg']['cfgTmpl'] = str(template)
+    with pytest.raises(ValueError, match='cfgTmpl'):
         Create(state)
     assert ([resource['kind'] for resource in state.resources] == ['Secret'])
-
-
-def test__DEF__FXT_CFG_CDIWrapperDefaultsAndDocstringAgree() -> None:
-    cfg = MUT._DEF__FXT_CFG
-    for section in (
-        cfg.fxtInf.gstCfg, cfg.fxtInf.gstCfg.imgSrc,
-        cfg.fxtInf.gstCfg.imgSrc.CDI, cfg.fxtInf.gstCfg.imgSrc.CDI.credInfo,
-        cfg.fxtInf.gstCfg.usrCrd,
-    ):
-        assert (type(section) is MUT.NamedDict)
-    source = cfg.fxtInf.gstCfg.imgSrc.CDI
-    assert (type(source.credInfo.vaultInfo) is dict)
-    assert (source.credInfo.vaultInfo == {
-        'file--AccKeyId': '/secretMount/secretFileForAccKeyId',
-        'file--AccKeySecret': '/secretMount/secretFileFoAccKeySecret',
-    })
-    assert ((source.type == 'AWS-S3') and (source.credType == 'K8s'))
-    assert (source.credInfo.vaultType == 'LocalFile')
-    assert (source.credInfo.name == 'aws-s3--cred')
-    schema = MUT.FxtVM.__doc__.split('Complete YAML schema:')[1]
-    blocks = [
-        textwrap.dedent(block.split('```')[0])
-        for block in schema.split('```yaml')[1:]
-    ]
-    assert (len(blocks) == 2)
-    main = list(yaml.safe_load_all(blocks[0]))
-    credentials = list(yaml.safe_load_all(blocks[1]))
-    assert (main == [
-        {'CDI': {'type': 'AWS-S3', 'credType': 'None', 'url': source.url}},
-        {'CDI': {
-            'type': 'AWS-S3', 'credType': 'K8s', 'credInfo': {},
-            'url': source.url,
-        }},
-    ])
-    assert (type(main[0]['CDI']['credType']) is str)
-    assert (credentials[0] == source.credInfo)
-    assert (credentials[1] == {
-        'name': 'aws-s3--cred', 'vaultType': 'BitWarden',
-        'vaultInfo': {
-            'name': '...bwNoteName...', 'subField': '...bwSubFieldName...',
-        },
-    })
-    assert ('# To be implemented.' in blocks[1])
 
 
 @pytest.mark.parametrize('section', [

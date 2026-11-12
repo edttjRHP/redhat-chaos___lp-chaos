@@ -1,0 +1,9 @@
+sourceFile:
+  envVar: | # Trusted Bash Shell Script.
+    export ENABLE_ES="${ENABLE_ES:-True}"
+    export ES_SERVER="${ES_SERVER:-https://open-search.lp-chaos--svc--web-app.chaos.lp.devcluster.openshift.com}"
+    export ES_PORT="${ES_PORT:-443}"
+    [ "${ENABLE_ES,,}" = false ] || {
+        export ES_USERNAME="${ES_USERNAME:?Must set Env. Var. \`ES_USERNAME\`.}"
+        export ES_PASSWORD="${ES_PASSWORD:?Must set Env. Var. \`ES_PASSWORD\`.}"
+    }

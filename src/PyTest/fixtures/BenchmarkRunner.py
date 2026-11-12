@@ -1,5 +1,5 @@
 '''
-BenchmarkRunner fixtures - VM provisioning at scale.
+BenchmarkRunner (BR) fixtures - VM provisioning at scale.
 
 https://github.com/redhat-performance/benchmark-runner
 '''
@@ -80,7 +80,12 @@ class FuncParsVMcreateByBR:
 
 @dataclasses.dataclass(frozen=True)
 class FxtObjVMbyBR(FxtObjVM):
-    '''Benchmark-runner VM fixture object.'''
+    '''
+    Fixture Object.
+
+    Can be sub-classed to add fields. Sub-classes must also be decorated with
+    `@dataclass(frozen=True)`.
+    '''
 
 
 def VMcreateByBR(
@@ -97,23 +102,28 @@ def VMcreateByBR(
     Calls `benchmark_runner.main.main.main()` with the required Env. Variables
     inside `fxtInf.rootPath.br` and reconciles created VM UIDs.
 
+    Additional batches share fixture teardown and append to `vmList`. Guest SSH
+    requires matching guest authorization (depending on the used VM Image
+    Template), the BR VM Template do not guarantee the given public key is
+    installed inside the Guest OS.
+
     :param request:
         Pytest `request` built-in fixture.
         See `FxtVMbyBR()` for fixture parametrization details.
     :param fPars:
         Persistent function parameters.
           - fxtCfgObj:
-                Base fixture configuration. See `FxtVMbyBR` for details.
+                Base fixture configuration. See `FxtVMbyBR()` for details.
           - vmList:
                 Shared list to which created `VM` wrappers are appended.
           - ownResTrk:
                 Shared ownership OpenShift Resource records for fixture
-                cleanup. Each item below is a list of `oc` CLI, Resource
-                Reference and UID.
+                cleanup. Each group below holds `(oc, resRef, UID)`
+                tuples, recording the CLI, Resource Reference and UID.
                   - VMs:    VirtualMachine Resources.
     :param ocCLI:       Factory for the `OCcli` used by each VM.
     :param virtCtlCLI:  Factory for the `VirtCtlCLI` used by each VM.
-    :param fxtCfgArgs:  Fixture conf. overrides. See `FxtVMbyBR` for details.
+    :param fxtCfgArgs:  Fixture conf. overrides. See `FxtVMbyBR()` for details.
 
     :return:
         A list of `VM` instances created by this call.
@@ -260,6 +270,23 @@ def FxtVMbyBR(
     '''
     Create initial VMs and expose their shared factory and aggregate list.
 
+    VMs live until module teardown. Setup blocks (it is not a non-blocking job
+    API) until the separate runner process and default startup/Ready waits end
+    not guaranteeing SSH connection to the Guest OS.
+    Prepare the workload/image and Namespace (set WORKER_NODE for scale).
+    Existing generated VM names cause failure, not reused.
+    A `RUN_ARTIFACTS_PATH` / `ssh` / `vm_key` artifact overrides `sshKey` when
+    present. The guest must have been pre-prepared to authorize its matching
+    public key.
+
+    Teardown closes connections and attempts deletion of owned VMs only (not
+    Namespace or complete vendor-artifact cleanup).
+
+    Local artifacts are retained. The `vmCreate(...)` returns its batch and
+    appends to `vmList`.
+
+    This is the complete Fixture Configuration reference (see
+    `docs/guide--benchmark-runner.md` for concise usage).
     Configure via indirect parametrize with `dict`:
         @pytest.mark.parametrize(
             'fxtVMbyBR,',
@@ -275,7 +302,8 @@ def FxtVMbyBR(
               - ocCfg:  Configuration options for `OCcli`.
               - vcCfg:  Configuration options for `VirtCtlCLI`.
           - ns:
-            Kubernetes Namespace (default: `LPQE__DEF__NAMESPACE`).
+            Kubernetes Namespace (default:
+            `.libs.CommonConstant.LPQE__DEF__NAMESPACE`).
           - fxtInf:
             Fixture settings:
               - rootPath:
@@ -290,6 +318,7 @@ def FxtVMbyBR(
                     (default: `'windows'`).
                   - wlKind:
                     Resource kind suffix (default: `'vm'`).
+                  - brEnv: Vendor environment overrides (default: {}).
                   - timeout:
                       - vmStart:
                         The `timeout` par. for `VM.Start()` (default: `'15m'`).

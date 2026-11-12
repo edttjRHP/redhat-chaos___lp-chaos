@@ -39,7 +39,7 @@ _DEF__FXT_CFG = NamedDict(
     ns=LPQE__DEF__NAMESPACE,
     fxtInf=NamedDict(
         vmCfg=NamedDict(
-            cfgFile='config--vm--template.yaml',
+            cfgTmpl='cfg-template--vm.yaml',
             ctxData={},
             namePfx='lpqe-test',
             count=1,
@@ -197,25 +197,34 @@ def VMcreate(
     '''
     Create VMs from a Jinja2 template and return `VM` wrapper objects.
 
+    Additional batches share fixture teardown and append to `vmList`. Guest SSH
+    connections are lazy. Choose distinct `namePfx` values unless
+    `reuseExisting` is intended. Reused VMs remain unowned.
+
+    Register created resources and VM wrappers before waiting for DV imports.
+    If an import fails, fixture teardown still attempts cleanup in order, i.e.
+    VMs, then Secrets, then Namespaces, even if an earlier cleanup fails.
+    Cleanup is best effort and can leave left over resources.
+
     :param request:
         Pytest `request` built-in fixture.
         See `FxtVM()` for fixture parametrization details.
     :param fPars:
-        Persistent function paremeters.
-          - fxtCfgObj:  Base fixture configuration. See `FxtVM` for details.
+        Persistent function parameters.
+          - fxtCfgObj:  Base fixture configuration. See `FxtVM()` for details.
           - vmList:
                 Shared list to which created `VM` wrappers are appended.
           - ownResTrk:
                 Shared ownership OpenShift Resource records for fixture
-                cleanup. Each item below is a list of `oc` CLI, Resource
-                Reference and UID.
+                cleanup. Each group below holds `(oc, resRef, UID)`
+                tuples, recording the CLI, Resource Reference and UID.
                   - NSs:        Namespace Resources.
                   - Secrets:    Secret Resources.
                   - VMs:        VirtualMachine Resources.
           - sshKeyDirs: Fixture-owned SSH key temporary directories.
     :param ocCLI:       Factory for the `OCcli` used by each VM.
     :param virtCtlCLI:  Factory for the `VirtCtlCLI` used by each VM.
-    :param fxtCfgArgs:  Fixture conf. overrides. See `FxtVM` for details.
+    :param fxtCfgArgs:  Fixture conf. overrides. See `FxtVM()` for details.
 
     :return:
         A list of `VM` instances created or reused by this call.
@@ -233,7 +242,9 @@ def VMcreate(
     ns = fxtCfg.ns
     if not ns.strip(): raise ValueError('Namespace must not be empty.')
     sshKey = fxtCfg.fxtInf.gstCfg.usrCrd.sshKey
-    templPath = request.config.rootpath / 'conf' / fxtCfg.fxtInf.vmCfg.cfgFile
+    templPath = (
+        request.config.rootpath / 'conf/VM' / fxtCfg.fxtInf.vmCfg.cfgTmpl
+    ).resolve()
     ctxData = None
     vmResLst = []
     newVMs = []
@@ -396,7 +407,7 @@ def VMcreate(
             yamlStr = YAMLcfg.Render(templPath, {**ctxData, 'vmName': vmName})
             if not yamlStr.strip():
                 raise ValueError(
-                    'fxtInf.vmCfg.cfgFile must render nonempty VM YAML.'
+                    'fxtInf.vmCfg.cfgTmpl must render nonempty VM YAML.'
                 )
             resource = VirtualMachine.Create(
                 oc,
@@ -453,6 +464,19 @@ def FxtVM(
     '''
     Create initial VMs and expose their shared factory and aggregate list.
 
+    VMs live for one test. Startup waits for it to be Ready, not guaranteeing
+    SSH connection to the Guest OS. The used VM Image Template and VM Template
+    provide guest authorization. Reused VMs may still be started but are not
+    owned.
+
+    Teardown closes connections and attempts deletion of owned VMs, Secrets,
+    and Namespaces (beware, namespace deletion removes ALL of its contents)
+
+    Pre-existing resources stay unowned. Generated keys are temporary. The
+    `vmCreate(...)` returns only its batch and appends it to `vmList`.
+
+    This is the complete Fixture Configuration reference (see
+    `docs/guide--vm.md` for concise usage and custom YAML templates).
     Configure via indirect parametrize with `dict`:
         @pytest.mark.parametrize(
             'fxtVM,',
@@ -474,14 +498,15 @@ def FxtVM(
               - ocCfg:  Configuration options for `OCcli`.
               - vcCfg:  Configuration options for `VirtCtlCLI`.
           - ns:
-            Kubernetes Namespace (default: `LPQE__DEF__NAMESPACE`).
+            Kubernetes Namespace (default:
+            `.libs.CommonConstant.LPQE__DEF__NAMESPACE`).
           - fxtInf:
             Fixture settings:
               - vmCfg:
                 VM manifest template and provisioning configurations:
-                  - cfgFile:
-                    Template configuration file under `conf/`
-                    (default: `'config--vm--template.yaml'`).
+                  - cfgTmpl:
+                    Template path, absolute or relative to `conf/VM/` under
+                    the PyTest root (default: `'cfg-template--vm.yaml'`).
                   - ctxData:
                     A `dict` context for the VM Manifest template (Jinja2). See
                     the used VM Manifest template for content. Some of the
@@ -492,7 +517,7 @@ def FxtVM(
                     Prefix for generated VM names (default: `'lpqe-test'`).
                   - count:      Number of VMs to create (default: `1`).
                   - startVM:    Start each VM (default: `True`).
-                  - fxtInf.vmCfg.reuseExisting:
+                  - reuseExisting:
                     Reuse VMs with generated names that already exist instead
                     of failing on a name collision (default: `False`).
                     WARNING:
@@ -504,8 +529,8 @@ def FxtVM(
                       - vmCreate:
                         Wait timeout for VM creation (default: `'15m'`).
                       - dvImport:
-                        Wait timeout for DV Import, for each referenced
-                        DataVolume in a new VM.
+                        Wait timeout for DV import, for each referenced
+                        DataVolume in a new VM (default: '30m').
                       - vmStart:
                         The `timeout` par. for `VM.Start()` (default: `'15m'`).
                       - vmRemove:

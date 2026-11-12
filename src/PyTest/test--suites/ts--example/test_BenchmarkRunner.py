@@ -15,8 +15,8 @@ if TYPE_CHECKING:
 logs = logging.getLogger()
 
 
-class TestBSOD():
-    '''BSOD tests'''
+class TestBR():
+    '''BenchmarkRunner readiness and optional guest-access examples.'''
 
     @pytest.mark.skip(reason='VM connectivity needs investigation.')
     @pytest.mark.vm__br

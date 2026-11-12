@@ -1,160 +1,118 @@
 # PyTest Framework
 
-This reusable PyTest framework supports Layered Product Chaos testing on OpenShift through shared fixtures,
-configuration utilities, CLI wrappers, and scenario-specific assertions. Its current integrations focus on OpenShift
-Virtualization: VM lifecycle management, guest access, `benchmark-runner` provisioning, and `krkn-lib` Chaos
-orchestration.
+Use these fixtures to provision VMs, communicate with their guests, and inject chaos into a Cluster Under Test (CUT).
+
+## Choose a Fixture
+
+| Fixture       | Purpose                                                                                       | Lifetime      |
+|---------------|-----------------------------------------------------------------------------------------------|---------------|
+| `fxtVM`       | Create VMs from a supplied or bundled YAML/Jinja template, with guest communication support.  | Per test      |
+| `fxtVMbyBR`   | Deploy VM workloads at scale through benchmark-runner's separate worker process.              | Per module    |
+| `fxtKrkn`     | Inject chaos into the CUT by running a Krkn Hub scenario.                                     | Per test      |
+
+Both VM fixtures return `vmList` and `vmCreate(...)` for additional batches. Setup waits for provisioning and, by default, VM startup/Ready; it is not a
+fire-and-forget background API. `vm.ssh` connects lazily when first used and supports guest commands, PowerShell, and file transfer. Ready does not prove guest
+communication or authorization.
+
+The `fxtVM` can create multiple VMs, but prefer benchmark-runner for scale-oriented workloads rather than the direct fixture's sequential VM operations. This
+is usage guidance, not a measured performance guarantee.
 
 
-## Framework Capabilities
+## Prerequisites
 
-| Integration                   | Role                                                              |
-|-------------------------------|-------------------------------------------------------------------|
-| PyTest                        | Organizes selection, fixtures, assertions, and reporting.         |
-| Configuration utilities       | Merge fixture settings and render Jinja2/YAML configuration.      |
-| OpenShift Virtualization      | Provides VM lifecycle and guest access through CLI/SSH wrappers.  |
-| benchmark-runner              | Provides an alternative path for provisioning one or more VMs.    |
-| krkn-lib                      | Provides Pod and Node operations for resiliency scenarios.        |
-
-The `conftest.py` registers the `fxtOCcli`, `fxtVirtCtlCLI`, `fxtVM`,`fxtVMbyBR`, and `fxtKrkn` fixtures. Indirect
-parametrization supplies fixture settings (use `NamedDict` for nested settings that need dot access). The VM fixtures
-expose a shared `vmList` and a `vmCreate` factory for additional batches. VM wrappers provide start/stop operations and
-lazy SSH access, including shell and PowerShell commands and SCP file transfer. `YAMLcfg` renders templates and
-converts YAML, JSON, and dictionaries.
-
-`NamedDict` deep merge (`|`) requires exact concrete types at existing keys, including nested keys; mismatches raise
-`TypeError` with a backtick-delimited key path and expected/received types, not values. Key components use Python
-`repr` to represent quotes, backslashes and control characters. Matching `dict` and `NamedDict` values recurse;
-matching exact lists concatenate into a new list without changing either input list. Order, duplicates and shallow
-item identities are preserved; list items are not recursively merged. Reapplying an override appends its items again,
-so list merges are intentionally not idempotent. Tuples, sets and custom sequences do not concatenate. Other matching
-values replace, and new keys are inserted unchanged. Plain dictionaries cannot override existing
-`NamedDict` sections. `None` is not a wildcard for a different type.
-
-Fixture-specific settings belong under `fxtInf`, not at the top level:
-  - `fxtVM`: `fxtInf.vmCfg` contains `count`, `cfgFile`, `namePfx`, `reuseExisting`, `ctxData`, and `timeout`.
-    Guest image and connection settings belong under `fxtInf.gstCfg`.
-  - `fxtVMbyBR`: `fxtInf.brCfg` contains `count`, `wlName`, and `wlKind`.
-    Guest connection settings belong under `fxtInf.gstCfg`.
-  - `fxtKrkn`: parameters belong under `fxtInf.krknCfg`; vendor paths are `fxtInf.rootPath.krkn` and
-    `fxtInf.rootPath.krknHub`.
-
-Use `NamedDict` for these nested sections; `fxtInf.vmCfg.ctxData` is a plain `dict`. Shared settings such as `ns`,
-`kCfg`, `cliCfg`, and `testPars` remain at the top level.
+- Use Python 3.11 and authenticated `oc`/`virtctl` access to a disposable CUT with OpenShift Virtualization.
+- Supply usable guest images, compatible storage, and any image-source credentials; repository values are examples.
+- For guest communication, provide OpenSSH tools and a guest SSH service/user authorized for the selected key. The bundled Windows template requires its
+  Cloudbase-Init guest setup. Custom images/templates need equivalent setup.
+- Install benchmark-runner in its configured vendor virtual environment, or Krkn and Krkn Hub at their configured paths, only when using those integrations.
+  Krkn rendering also requires GNU `envsubst` and Bash.
+- Align CLI context and runner kubeconfig with the same CUT. `kCfg` defaults to `KUBECONFIG` or `~/.kube/config`; shared CLI factories use their configured CLI
+  context.
 
 
-## Test Lifecycle
+## Configure and Write a Test
 
-Scenarios live under `test--suites/`; Framework Unit Test live under `test--unit/`. Markers in `pytest.ini`.
+Use indirect parametrization and `NamedDict` for schema sections. Keep payloads plain dictionaries: `cliCfg.ocCfg`, `cliCfg.vcCfg`, `fxtInf.vmCfg.ctxData`,
+`fxtInf.brCfg.brEnv`, `fxtInf.krknCfg.krknEnv`, and `fxtInf.gstCfg.imgSrc.CDI.credInfo.vaultInfo`. Common settings are `ns` (default: `default`), `kCfg`,
+`cliCfg.ocCfg`, `cliCfg.vcCfg`, and `testPars`. Dictionary sections merge; matching lists append. Existing value types must match unless either value is
+`None`. See each fixture guide for options and prerequisites.
 
-A scenario's lifecycle is:
- 1. PyTest selects a scenario and supplies its configuration.
- 2. The framework prepares cluster clients and, when requested, creates VMs.
- 3. The scenario checks its starting conditions, performs its action, and evaluates the resulting VM, Pod, Node, or
-    guest state.
- 4. VM-fixture teardown attempts to close cached guest connections and delete VMs whose current UID matches the
-    recorded ownership UID. Lookup and deletion are not atomic; cleanup can fail. Reused VMs are not deleted.
+```python
+import pytest
 
-The `vm` examples request one Windows VM through local-template `fxtVM` or `fxtVMbyBR`. The local example starts the VM
-and checks a fixed PowerShell response; the benchmark-runner example uses guest commands and file transfer. The
-`vm__br` example requests two VMs through `fxtVMbyBR` and checks their SSH
-service. The `krkn-lib` examples target an existing VM: one deletes its launcher Pod and checks recovery; the other
-reads kernel information through a temporary privileged Pod. These examples do not implement Windows bugcheck
-injection, Guest OS crash detection, or crash-dump collection and analysis.
+from fixtures.VM import FxtObjVM
+from libs.CustomTypes import NamedDict
 
 
-## Current Limitations
-
-Limitations:
-  - The example suite is environment-specific and should not be treated as a portable acceptance suite.
-  - The single-VM benchmark-runner example's local file paths require adaptation.
-  - Both benchmark-runner examples remain blocked by upstream configuration capture and unresolved runtime dependency
-    compatibility; see the [benchmark-runner guide](docs/guide--benchmark-runner.md).
-  - See the [fxtVM configuration schema](fixtures/VM.py) for VM inputs.
-  - Scaled benchmark-runner provisioning reads `WORKER_NODE`; workload/image preparation and matching Guest OS
-    credentials remain caller responsibilities.
-  - The launcher-pod recovery example expects a VM with `runStrategy: Always`; the repository template uses `Manual`.
-    The node-inspection example reads data but still creates and deletes privileged cluster resources.
-
-
-### VM Template Context
-
-The `YAMLcfg.Render` accepts caller-owned `ctxData` for `conf/config--vm--template.yaml`:
-  - Required:
-      - vmDataVolumeSource: A non-empty mapping that identifies a real CDI image source.
-      - sshPublicKeyB64: A non-empty string containing the base64 encoding of the complete raw OpenSSH public-key text.
-  - Optional (default):
-      - vmName (`'vm-img--windows'`)
-      - vmNS (`'default'`)
-      - vmDataVolumeName (`vmName + '--vhd--00-system'`)
-      - vmStorageSize (`'96Gi'`)
-      - vmStorageClass (`'gp3-csi'`)
-      - vmCpuCores (`4`): Constraint: `> 0`.
-      - vmMemory (`'8Gi'`)
-
-Header values remain native; each variable is JSON-serialized once where it is inserted into YAML:
-```yaml
-{% set vmNS = vmNS | default('default') %}
-...
-namespace: {{ vmNS | tojson }}
+@pytest.mark.parametrize(
+    'fxtVM,',
+    [({
+        'ns': 'my-test',
+        'fxtInf': NamedDict(vmCfg=NamedDict(namePfx='my-vm')),
+    },)],
+    indirect=True,
+)
+def test_GuestCommand(fxtVM: FxtObjVM) -> None:
+    result = fxtVM.vmList[0].ssh.RunPowerShell('Write-Output ready')
+    assert result.success
 ```
-This preserves YAML-looking strings and escapes special characters.
 
-Callers must validate the CDI source/backend, Kubernetes names and quantities, storage capacity/class, and
-base64/OpenSSH key content. The `gp3-csi` is only an example default, not a cluster guarantee. The Windows image must
-support the template's Cloudbase-Init script and SSH setup. Defaults do not supply an image, source credentials, or a
-key.
+Configure image and credentials first. See [direct VMs and custom templates](docs/guide--vm.md), [benchmark-runner](docs/guide--benchmark-runner.md), and
+[Krkn Hub](docs/guide--krkn.md).
 
 
-## Getting Started
+## Best Practices
 
-Run from the repository root with Python 3.11. For local discovery, the isolated-unit dependencies are sufficient
-because `benchmark-runner` and `krkn-lib` are imported only when their fixtures execute:
+- **Namespace isolation is a recommendation, not automatic.** Prefer a dedicated namespace per test for `fxtVM` and standalone `fxtKrkn` scenarios. Prefer a
+  dedicated namespace per module for module-scoped `fxtVMbyBR`, whose VMs remain available to that module's tests until teardown. Separate concurrent runs and
+  parameter groups as needed.
+- Share a module namespace only when tests intentionally share VMs and their mutations. Avoid having a function-scoped fixture create a namespace containing
+  module-scoped or caller-owned resources: deleting that namespace removes its contents. Pre-create shared namespaces and manage their lifetime outside the
+  shorter-lived fixture.
+- The `fxtVM` reuses an existing generated name in the same namespace only with `reuseExisting=True`; reused VMs are not owned or deleted by that fixture.
+  Supply valid existing credentials and restore any test changes yourself. The `fxtVMbyBR` does not offer this reuse option and rejects collisions with its
+  generated VM names.
+- VM teardown closes guest connections and attempts deletion only for VMs still matching their recorded ownership. The `fxtVM` also removes namespaces/Secrets
+  it created; pre-existing ones remain. BR cleanup covers its tracked VMs, not every workload artifact or namespace. Krkn scenario cleanup is the scenario
+  author's responsibility.
+- Assert guest access explicitly when needed. Neither a Ready condition nor possession of an SSH key grants guest authorization. Review disruptive scenarios
+  and retained artifacts before use; keep credentials out of source/logs.
+
+
+## NamedDict Merge API Reference
+
+The `NamedDict` deep merge (`|`) requires exact concrete types at existing keys, including nested keys, unless either value is `None`. Mismatches raise
+`TypeError` with a backtick-delimited key path and expected/received types, not values. Key components use Python `repr` to represent quotes, backslashes and
+control characters. Matching exact `dict` and `NamedDict` values recurse; matching exact lists concatenate into a new list without changing either input list.
+Order, duplicates and shallow item identities are preserved; list items are not recursively merged. Reapplying an override appends its items again, so list
+merges are intentionally not idempotent. Tuples, sets and custom sequences do not concatenate. Other matching values replace, and new keys are inserted
+unchanged. Plain dictionaries cannot override existing non-null `NamedDict` sections. A `None` base accepts the override value; a `None` override replaces the
+existing value with `None`.
+
+
+## Test Locations and Examples
+
+Put scenarios under `test--suites/` and isolated unit tests under `test--unit/`. The PyTest root's [`conftest.py`](conftest.py) registers the shared CLI, VM,
+benchmark-runner, and Krkn fixtures for scenario tests. Use indirect parametrization for configuration and normal assertions for outcomes.
+
+- `vm`: [direct VM example](test--suites/ts--example/test_VM.py) creates a VM and asserts a guest PowerShell response.
+- `vm__br`: [benchmark-runner examples](test--suites/ts--example/test_BenchmarkRunner.py) include two VM Ready checks and a skipped legacy guest
+  SSH/file-transfer test.
+- `krkn`: [Krkn examples](test--suites/ts--example/test_Krkn.py) are skipped launcher-Pod/host-observation placeholders.
+
+Adapt all environment-specific values. No current example implements a complete BSOD detection/analysis workflow. See the
+[BSOD roadmap](docs/roadmap--krkn-lib-bsod.md) for planned work.
+
+
+## Discovery and Offline Unit Tests
+
+From `src/PyTest/`, use the existing test environment to inspect selection without executing fixture setup:
 ```bash
-cd src/PyTest
-./setup.sh
-pytest -c pytest.ini test--suites/ --collect-only
-pytest -c pytest.ini test--suites/ts--example/test_VM.py --collect-only
-pytest -c pytest.ini test--suites/ -m vm__br --collect-only
-pytest -c pytest.ini test--suites/ -m krkn --collect-only
+python -m pytest -c pytest.ini test--suites/ --collect-only
+python -m pytest -c pytest.ini test--suites/ -m vm__br --collect-only
+python -m pytest -c pytest.ini test--suites/ -m krkn --collect-only
+python -m pytest -c pytest--unit.ini test--unit/
 ```
 
-Before executing any scenario, verify compatible runtime dependencies and address applicable example limitations.
-Review the Namespace, VM identity, CLI context, and Krkn's kubeconfig together. Run only on an authorized, disposable
-OpenShift Virtualization environment with the required `oc`, `virtctl`, OpenSSH tools, credentials, images, and Guest
-access.
-
-
-### Krkn Hub
-
-With Krkn and Krkn Hub already available at `fxtInf.rootPath.krkn` and `fxtInf.rootPath.krknHub`, call
-`fxtKrkn.krknHub.Run('pod-scenarios')`. Installation remains a separate step. The runner is Krkn's `run_kraken.py`.
-The call sources Hub `env.sh` then the scenario's `env.sh` in one Bash session. Set `KRKN_HUB__TEMPL__SCN__FN`
-relative to the scenario directory and `KRKN_HUB__TEMPLATE__CFG__FN` relative to the Hub root; absolute paths work too.
-GNU `envsubst` must be on `PATH`. Each call retains a UTC `YYYYMMDDTHHmmssZ--<scnName>` run directory under
-`IENG_PYTEST____FXT__KRKN____KRKN__RUN_DIR__ROOT` (default `/tmp`, relative roots resolve from the caller's CWD).
-An existing run directory fails rather than reusing artifacts; nested scenario names retain their directory structure.
-It renders `SCENARIO_FILE` and `config/chaos.yaml`, then runs from the run directory with the absolute config path.
-Relative `ALERTS_PATH`, `METRICS_PATH`, and `RESILIENCY_FILE` resolve from the Krkn root; relative `SCENARIO_FILE`,
-`ROLLBACK_VERSIONS_DIRECTORY`, and `TELEMETRY_ARCHIVE_PATH` use the run directory. Absolute paths are preserved.
-`KRKN_DEBUG=True` adds `--debug True`. No preparation callable, scenario-local Python script, or upstream checks run.
-Optional `envVars` override the runner's environment, including `KUBECONFIG`; `initGlb` and `runName` pass through.
-Use absolute kubeconfig paths; kubeconfig handling is unchanged.
-The caller's environment and working directory are restored on completion or error.
-
-
-### Unit Tests
-
-The isolated unit suite mocks process, SSH, and cluster boundaries and does not collect the environment-specific
-scenarios under `test--suites/`. From `src/PyTest/`, using the environment above:
-```bash
-.venv/bin/python -m pytest -c pytest--unit.ini test--unit/
-```
-
-
-## Documentation
-
-- [PyTest lifecycle](docs/walkthrough--pytest.md)
-- [benchmark-runner integration](docs/guide--benchmark-runner.md)
-- [krkn-lib integration](docs/guide--krkn-lib.md)
-- [Future BSOD scenario example roadmap](docs/roadmap--krkn-lib-bsod.md)
+Only remove `--collect-only` on an authorized, disposable CUT after reviewing the selected tests' creation, disruption, guest-access, and cleanup requirements.
+Unit tests use the separate `pytest--unit.ini` configuration.

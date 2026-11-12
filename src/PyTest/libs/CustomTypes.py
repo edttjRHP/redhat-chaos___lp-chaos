@@ -1,6 +1,7 @@
 '''Defines custom types.'''
 from abc import ABCMeta
 from collections import defaultdict
+from enum import Enum, auto
 import os
 from typing import Any, Union, Optional, Type
 
@@ -28,6 +29,88 @@ class NamedDict(dict):
 
     New keys retain their supplied values.
     '''
+    class NestedMode(Enum):
+        '''Select dictionary chains only, or also traverse lists and tuples.'''
+        CHAIN = auto()
+        ALL = auto()
+
+    @classmethod
+    def FromDict(
+        cls,
+        data: dict,
+        mode: NestedMode = NestedMode.CHAIN,
+    ) -> 'NamedDict':
+        '''
+        Convert `dict` to `NamedDict`, without mutating the input.
+
+        :param data:    The `dict` to convert, including a `NamedDict`.
+        :param mode:
+            Determine the traversal mode.
+              - NestedMode.CHAIN:
+                Traverse uninterrupted `dict` childs, i.e. will not traverse
+                into `list` or `tuple`.
+              - NestedMode.ALL:
+                Traverse all the way down into `list` and `tuple`. The
+                `list` and `tuple` Container Object itself will be rebuild,
+                i.e. their `id` is not retained.
+
+        :return:    A new `NamedDict` with converted `dict` children.
+
+        :raises TypeError:  The root is not a `dict` or mode is invalid.
+        '''
+        if not isinstance(data, dict):
+            raise TypeError('FromDict data must be a dictionary.')
+        if not isinstance(mode, NamedDict.NestedMode):
+            raise TypeError('mode must be a NamedDict.NestedMode member.')
+        return NamedDict._ConvertNested(data, mode, cls)
+
+    def ToDict(self, mode: NestedMode = NestedMode.CHAIN) -> dict:
+        '''
+        Convert `NamedDict` to `dict`, without mutating the input.
+
+        :param mode:
+            Determine the traversal mode.
+              - NestedMode.CHAIN:
+                Traverse uninterrupted `NamedDict` or `dict` childs, i.e. will
+                not traverse into `list` or `tuple`.
+              - NestedMode.ALL:
+                Traverse all the way down into `list` and `tuple`. The
+                `list` and `tuple` Container Object itself will be rebuild,
+                i.e. their `id` is not retained.
+
+        :return:    A new `dict` with converted `NamedDict` children.
+
+        :raises TypeError:  The mode is not a `NamedDict.NestedMode` member.
+        '''
+        if not isinstance(mode, NamedDict.NestedMode):
+            raise TypeError('mode must be a NamedDict.NestedMode member.')
+        return NamedDict._ConvertNested(self, mode, dict)
+
+    @staticmethod
+    def _ConvertNested(
+        value: Any,
+        mode: NestedMode,
+        mappingType: type[dict],
+    ) -> Any:
+        '''Convert supported containers, leaving unrelated values unchanged.'''
+        if isinstance(value, dict):
+            return mappingType({
+                key: NamedDict._ConvertNested(child, mode, mappingType)
+                for (key, child) in dict.items(value)
+            })
+        if (mode is NamedDict.NestedMode.ALL):
+            if isinstance(value, list):
+                return [
+                    NamedDict._ConvertNested(child, mode, mappingType)
+                    for child in value
+                ]
+            if isinstance(value, tuple):
+                return tuple(
+                    NamedDict._ConvertNested(child, mode, mappingType)
+                    for child in value
+                )
+        return value
+
     class _TypeReplace:
         '''
         Marker to indicate replacing value (instead of merging) is requested

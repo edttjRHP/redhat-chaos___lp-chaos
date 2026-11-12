@@ -6,7 +6,7 @@ import os
 import shlex
 import subprocess
 import sys
-from typing import Optional, Union
+from typing import Optional, TextIO, Union
 from pathlib import Path
 
 from libs.Utils.DynLoad import UpdEnv
@@ -66,9 +66,9 @@ class BashEnv:
 
         return json.loads(line)
 
-    def Source(self, envFile: Union[str, Path]) -> None:
+    def Source(self, envFile: Union[str, Path, TextIO]) -> None:
         '''
-        Execute sourcing of a Bash Shell file.
+        Source a file or execute a readable text stream in this Shell.
 
         Send STDOUT prints, produced by `envFile`, to STDERR, so it does not
         corrupt the one-JSON-document-per-line protocol on STDOUT.
@@ -77,18 +77,25 @@ class BashEnv:
         raises.
 
         :param envFile:
-            Bash Shell script file to set, update, and/or delete Env.
-            Variables.
+            Shell script path or readable text stream to set, update, and/or
+            delete Env. Variables.
+            Streams is wrapped into a brace group, no temporary script file is
+            created.
             It may also do some File System modification, if needed.
-            Any change in Bash Shell Variables will not be effective towards
-            this Python Process.
+            Any change in Shell Variables will not be effective towards this
+            Python Process.
 
         :raises OSError:    Writing to the Bash process fails.
         '''
-        self.proc.stdin.write(
-            f'source {shlex.quote(os.fspath(envFile))} 0</dev/null 1>&2 || '
-            'exit $?\n'
-        )
+        if hasattr(envFile, 'read'):
+            self.proc.stdin.write('{\n: # Protect from empty file.\n')
+            while (chunk := envFile.read(65536)): self.proc.stdin.write(chunk)
+            self.proc.stdin.write('\n} 0< /dev/null 1>&2 || exit $?\n')
+        else:
+            self.proc.stdin.write(
+                f'source {shlex.quote(os.fspath(envFile))} 0< /dev/null 1>&2 '
+                '|| exit $?\n'
+            )
         self.proc.stdin.flush()
 
     def Close(self) -> None:
@@ -110,7 +117,7 @@ class BashEnv:
 
 def GetEnvDelta(
     shEnvClass: Union[BashEnv],
-    envFiles: Iterable[Union[str, Path]],
+    envFiles: Iterable[Union[str, Path, TextIO]],
 ) -> dict[str, Optional[str]]:
     '''
     Get the Env. Variables difference between after and before sourcing
@@ -120,7 +127,7 @@ def GetEnvDelta(
         Shell Env. Handler class that contains `Snapshot()`, `Source()`, and
         `Close()` Methods.
     :param envFiles:
-        Shell script files to be sourced in order.
+        Shell script paths or readable text streams to execute in order.
 
     :return:
         A `dict` containing Env. Variables are modified or unset after
@@ -145,7 +152,7 @@ def GetEnvDelta(
 
 
 def DoShellSource(
-    envFiles: Iterable[Union[str, Path]],
+    envFiles: Iterable[Union[str, Path, TextIO]],
     shellKind: ShellKind = ShellKind.BASH,
 ) -> None:
     '''
@@ -155,7 +162,7 @@ def DoShellSource(
     changes must be restored, including when sourcing a file raises.
 
     :param envFiles:
-        Shell script files to be sourced in order.
+        Shell script paths or readable text streams to execute in order.
     :param shellKind:
         Shell Interpreter Kind to be used to source the `envFiles`
         (default: ShellKind.BASH).

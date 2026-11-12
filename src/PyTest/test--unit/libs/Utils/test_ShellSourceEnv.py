@@ -1,5 +1,5 @@
 from collections.abc import Iterator
-from io import TextIOBase
+from io import StringIO, TextIOBase
 import json
 import os
 from pathlib import Path
@@ -16,11 +16,13 @@ import Utils
 
 
 @pytest.mark.parametrize('pyBin', [None, sys.executable])
+@pytest.mark.parametrize('usePath', [False, True])
 def test_GetEnvDelta_SourcesQuotedScriptAndClosesNativeBash(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capfd: pytest.CaptureFixture[str],
     pyBin: str | None,
+    usePath: bool,
 ) -> None:
     monkeypatch.setenv('UNIT_SHELL_DELETE', 'old')
     monkeypatch.setenv('UNIT_SHELL_KEEP', 'unchanged')
@@ -35,7 +37,9 @@ def test_GetEnvDelta_SourcesQuotedScriptAndClosesNativeBash(
     shEnv = MUT.BashEnv(pyBin)
 
     try:
-        updated = MUT.GetEnvDelta(lambda: shEnv, [envFile])
+        updated = MUT.GetEnvDelta(
+            lambda: shEnv, [(envFile if usePath else str(envFile))],
+        )
         assert (updated['UNIT_SHELL_DELETE'] is None)
         assert (updated['UNIT_SHELL_NEW'] == 'value with spaces and $literal')
         assert ('UNIT_SHELL_KEEP' not in updated)
@@ -59,6 +63,244 @@ def BashEnv(monkeypatch: pytest.MonkeyPatch) -> MUT.BashEnv:
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None, text=True,
     )
     return shEnv
+
+
+@pytest.fixture(name='nativeBashEnv')
+def NativeBashEnv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[MUT.BashEnv]:
+    for key in tuple(os.environ):
+        if key.startswith('UNIT_STREAM_'): monkeypatch.delenv(key)
+    shEnv = MUT.BashEnv()
+    try: yield shEnv
+    finally:
+        shEnv.Close()
+        shEnv.proc.stdin.close()
+        shEnv.proc.stdout.close()
+
+
+@pytest.mark.parametrize('usePath', [False, True])
+def test_Source_QuotesPathsAndProtectsCommandChannel(
+    bashEnv: MUT.BashEnv,
+    usePath: bool,
+) -> None:
+    path = Path("quoted ' environment.sh")
+
+    bashEnv.Source((path if usePath else str(path)))
+
+    bashEnv.proc.stdin.write.assert_called_once_with(
+        f'source {shlex.quote(str(path))} 0< /dev/null 1>&2 || exit $?\n'
+    )
+    bashEnv.proc.stdin.flush.assert_called_once_with()
+
+
+def test_Source_CopiesStreamContentWithoutQuotingOrClosing(
+    bashEnv: MUT.BashEnv,
+) -> None:
+    content = 'export UNIT_STREAM_VALUE="literal \'quotes\' and $HOME"'
+    stream = StringIO(content)
+
+    bashEnv.Source(stream)
+
+    assert (bashEnv.proc.stdin.write.call_args_list == [
+        mock.call('{\n: # Protect from empty file.\n'), mock.call(content),
+        mock.call('\n} 0< /dev/null 1>&2 || exit $?\n'),
+    ])
+    bashEnv.proc.stdin.flush.assert_called_once_with()
+    assert not stream.closed
+
+
+@pytest.mark.parametrize('script,expected', [
+    ('', {}),
+    ('# comment without newline', {}),
+    (' \n\t', {}),
+    ('export UNIT_STREAM_VALUE=plain', {'UNIT_STREAM_VALUE': 'plain'}),
+    (
+        'export UNIT_STREAM_VALUE=plain # trailing comment',
+        {'UNIT_STREAM_VALUE': 'plain'}
+    ),
+    (
+        (
+            "export UNIT_STREAM_VALUE='\"; $literal `echo ignored` { }'\n"
+            'export UNIT_STREAM_SECOND="second line"'
+        ),
+        {
+            'UNIT_STREAM_VALUE': '"; $literal `echo ignored` { }',
+            'UNIT_STREAM_SECOND': 'second line'
+        }
+    ),
+])
+def test_Source_ExecutesTextAndPreservesBoundaryNewline(
+    nativeBashEnv: MUT.BashEnv,
+    script: str,
+    expected: dict[str, str],
+) -> None:
+    stream = StringIO(script)
+
+    nativeBashEnv.Source(stream)
+    snapshot = nativeBashEnv.Snapshot()
+
+    assert ({
+        key: value
+        for (key, value) in snapshot.items()
+        if key.startswith('UNIT_STREAM_')
+    } == expected)
+    assert not stream.closed
+    assert (stream.tell() == len(script))
+    nativeBashEnv.Source(StringIO('export UNIT_STREAM_NEXT=ready'))
+    assert (nativeBashEnv.Snapshot()['UNIT_STREAM_NEXT'] == 'ready')
+
+
+@pytest.mark.parametrize('realFile', [False, True])
+def test_Source_ReadsCurrentPositionAndLeavesCallerStreamOpen(
+    nativeBashEnv: MUT.BashEnv,
+    tmp_path: Path,
+    realFile: bool,
+) -> None:
+    prefix = 'ignored non-shell prefix\n'
+    script = 'export UNIT_STREAM_VALUE=from-offset'
+    if realFile:
+        path = tmp_path / 'readable text.txt'
+        path.write_text(prefix + script)
+        stream = path.open()
+    else:
+        stream = StringIO(prefix + script)
+    try:
+        stream.seek(len(prefix))
+        nativeBashEnv.Source(stream)
+        assert (nativeBashEnv.Snapshot()['UNIT_STREAM_VALUE'] == (
+            'from-offset'
+        ))
+        assert not stream.closed
+        assert (stream.read() == '')
+    finally:
+        stream.close()
+
+
+def test_Source_RetainsParentShellVariablesFunctionsAndUnsets(
+    nativeBashEnv: MUT.BashEnv,
+) -> None:
+    nativeBashEnv.Source(StringIO(
+        'localValue=retained\n'
+        'SetStreamValue() { export UNIT_STREAM_VALUE="$localValue"; }\n'
+        'export UNIT_STREAM_DELETE=old'
+    ))
+    assert (nativeBashEnv.Snapshot()['UNIT_STREAM_DELETE'] == 'old')
+    nativeBashEnv.Source(StringIO(
+        'unset UNIT_STREAM_DELETE\nSetStreamValue'
+    ))
+
+    snapshot = nativeBashEnv.Snapshot()
+    assert (snapshot['UNIT_STREAM_VALUE'] == 'retained')
+    assert ('UNIT_STREAM_DELETE' not in snapshot)
+    assert ('localValue' not in snapshot)
+
+
+def test_Source_IsolatesScriptStdinAndRedirectsOutputFromSnapshots(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    shEnv = MUT.BashEnv()
+    try:
+        shEnv.Source(StringIO(
+            'printf "non-json source output\\n"\n'
+            'if read -r input; then export UNIT_STREAM_READ=consumed; '
+            'else export UNIT_STREAM_READ=eof; fi'
+        ))
+
+        assert (shEnv.Snapshot()['UNIT_STREAM_READ'] == 'eof')
+        output = capfd.readouterr()
+        assert ('non-json source output' in output.err)
+        assert ('non-json source output' not in output.out)
+        assert (shEnv.Snapshot()['UNIT_STREAM_READ'] == 'eof')
+    finally:
+        shEnv.Close()
+        shEnv.proc.stdin.close()
+        shEnv.proc.stdout.close()
+
+
+@pytest.mark.parametrize('script', [
+    'false', 'export UNIT_STREAM_VALUE=partial\nfalse # no final newline',
+])
+def test_Source_FinalFailureIsDetectedBySnapshot(
+    nativeBashEnv: MUT.BashEnv,
+    script: str,
+) -> None:
+    nativeBashEnv.Source(StringIO(script))
+
+    with pytest.raises(RuntimeError, match='Bash exited unexpectedly'):
+        nativeBashEnv.Snapshot()
+    assert (nativeBashEnv.proc.wait(timeout=5) == 1)
+
+
+def test_Source_TransfersLargeStreamWithOnlyBoundedReads(
+    nativeBashEnv: MUT.BashEnv,
+) -> None:
+    readSizes = []
+
+    class BoundedStream(StringIO):
+        def read(self, size: int = -1) -> str:
+            assert (0 < size <= 65536)
+            readSizes.append(size)
+            return super().read(size)
+
+    stream = BoundedStream(
+        ('# bounded chunk payload\n' * 50000) +
+        'export UNIT_STREAM_VALUE=complete'
+    )
+
+    nativeBashEnv.Source(stream)
+
+    assert (nativeBashEnv.Snapshot()['UNIT_STREAM_VALUE'] == 'complete')
+    assert (len(readSizes) > 3)
+    assert (stream.tell() == len(stream.getvalue()))
+    assert not stream.closed
+
+
+def test_GetEnvDelta_ExecutesStreamsInOrderWithoutMutatingParent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv('UNIT_STREAM_DELETE', 'old')
+    before = dict(os.environ)
+    streams = [StringIO(
+        'localValue=retained\n'
+        'StreamValue() { printf "%s" "$localValue"; }'
+    ), StringIO(
+        'export UNIT_STREAM_VALUE="$(StreamValue)"\n'
+        'unset UNIT_STREAM_DELETE'
+    )]
+
+    delta = MUT.GetEnvDelta(MUT.BashEnv, streams)
+
+    assert (delta['UNIT_STREAM_VALUE'] == 'retained')
+    assert (delta['UNIT_STREAM_DELETE'] is None)
+    assert (dict(os.environ) == before)
+    assert all(not stream.closed for stream in streams)
+
+
+@pytest.mark.parametrize('sourceFails', [False, True])
+def test_DoShellSource_ExecutesStreamsWithUnsetsAndRestoration(
+    monkeypatch: pytest.MonkeyPatch,
+    sourceFails: bool,
+) -> None:
+    monkeypatch.setenv('UNIT_STREAM_DELETE', 'old')
+    monkeypatch.delenv('UNIT_STREAM_VALUE', raising=False)
+    before = dict(os.environ)
+    stream = StringIO(
+        'export UNIT_STREAM_VALUE=updated\nunset UNIT_STREAM_DELETE\n' +
+        ('false' if sourceFails else ':')
+    )
+
+    with TempEnv():
+        if sourceFails:
+            with pytest.raises(RuntimeError, match='Bash exited unexpectedly'):
+                MUT.DoShellSource([stream])
+            assert (dict(os.environ) == before)
+        else:
+            MUT.DoShellSource([stream])
+            assert (os.environ['UNIT_STREAM_VALUE'] == 'updated')
+            assert ('UNIT_STREAM_DELETE' not in os.environ)
+    assert (dict(os.environ) == before)
+    assert not stream.closed
 
 
 def test_Snapshot_UsesQuotedInterpreterAndDecodesOneLine(

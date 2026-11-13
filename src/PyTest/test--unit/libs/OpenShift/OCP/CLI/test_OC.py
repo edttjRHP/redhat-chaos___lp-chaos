@@ -13,6 +13,28 @@ import libs.OpenShift.OCP.CLI.OC as MUT
 import Utils
 
 
+@pytest.mark.parametrize('outer,inner', [
+    (True, False), (False, True), (True, True), (False, False),
+])
+def test_NewRes_SecretCannotBeDowngraded_ReviewRegression(
+    outer: bool,
+    inner: bool,
+) -> None:
+    cli = BuildCLI()
+    cli.Run.side_effect = [Result(True, '{}'), Result(True, ''), Result(
+        True, '{"kind":"Secret","metadata":{"name":"synthetic"}}',
+    )]
+    cli.NewRes({
+        'subCmd': 'secret generic', 'args': ['synthetic'],
+        'opts': {'isSecret': inner},
+    }, isSecret=outer, checkExist=True, waitCond=None)
+    assert (len(cli.Run.call_args_list) == 3)
+    assert all(
+        (call.kwargs['isSecret'] is outer)
+        for call in cli.Run.call_args_list
+    )
+
+
 @pytest.mark.parametrize('phase', ['APPLIED', 'WAITED'])
 @pytest.mark.parametrize('cleanup', ['absent', 'failed', 'exception'])
 @pytest.mark.parametrize('native', [False, True])

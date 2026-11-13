@@ -8,6 +8,24 @@ import pytest
 import libs.CustomTypes as MUT
 
 
+@pytest.mark.parametrize('cycle', ['none', 'self', 'mutual'])
+def test_NestedDefDict_RecursiveRepr_ReviewRegression(cycle: str) -> None:
+    value = MUT.NestedDefDict()
+    value['ordinary'] = {'items': [1, 2]}
+    if (cycle == 'none'):
+        assert (repr(value) == "{'ordinary': {'items': [1, 2]}}")
+        return
+    if (cycle == 'self'): value['child'] = value
+    else:
+        other = MUT.NestedDefDict()
+        value['child'] = other
+        other['child'] = value
+    result = repr(value)
+    assert ('...' in result)
+    assert ("'ordinary': {'items': [1, 2]}" in result)
+    assert (repr(value) == result)
+
+
 @pytest.mark.parametrize('direction', ['FromDict', 'ToDict'])
 @pytest.mark.parametrize('explicitMode', [False, True])
 def test_NestedConversion_ChainStopsAtListsAndTuples(

@@ -10,6 +10,26 @@ import libs.Utils.LibInVenv as MUT
 import Utils
 
 
+def test_Call_ReceiveFailureBeforeUnboundedWait_ReviewRegression(
+    workerContext: tuple[MUT.ModInVenv, mock.MagicMock],
+) -> None:
+    (worker, context) = workerContext
+    proc = context.Process.return_value
+    proc.is_alive.side_effect = [True, False, False]
+    proc.exitcode = None
+    error = FalseReceiveError('could not reconstruct')
+    context.Pipe.return_value[0].recv.side_effect = error
+    MUT.wait.side_effect = AssertionError('unbounded wait reached')
+    with pytest.raises(RuntimeError) as caught:
+        worker.Call('target', 'Callable')
+    assert (caught.value.__cause__ is error)
+    MUT.wait.assert_not_called()
+    proc.terminate.assert_called_once_with()
+    proc.join.assert_called_once_with(1)
+    proc.close.assert_called_once_with()
+    context.Pipe.return_value[0].close.assert_called_once_with()
+
+
 def test_Call_ImportsSpawnInFreshInterpreter() -> None:
     sourceRoot = Path(MUT.__file__).resolve().parents[2]
     code = (
@@ -175,11 +195,13 @@ def test_Call_CleansUpLiveChildAfterReceiveFailure(
     assert isinstance(raised.value.__cause__, EOFError)
     proc.terminate.assert_called_once_with()
     assert (proc.join.call_args_list == (
-        [mock.call()] + ([mock.call(1)] * (2 if killRequired else 1))
+        [mock.call(1)] * (2 if killRequired else 1)
     ))
     if killRequired: proc.kill.assert_called_once_with()
     else: proc.kill.assert_not_called()
     proc.close.assert_called_once_with()
+
+    MUT.wait.assert_not_called()
 
 
 @pytest.mark.parametrize('exitType', [MUT.ExitType.EXCEPTION, 'unknown'])
@@ -240,8 +262,8 @@ def test_Call_ReceiveErrorRetainsCauseAndReapsChild(
         worker.Call('target', 'Callable')
 
     assert (raised.value.__cause__ is error)
-    MUT.wait.assert_called_once_with([proc.sentinel])
-    proc.join.assert_called_once_with()
+    MUT.wait.assert_not_called()
+    proc.join.assert_not_called()
     proc.close.assert_called_once_with()
     proc.terminate.assert_not_called()
     proc.kill.assert_not_called()

@@ -128,12 +128,12 @@ def test_Render_VMtemplate_OrdersOptionalMappingsAndRetainsNativeTypes(
 
 
 @pytest.mark.parametrize('preset', [
-    'modelBase', 'modelNodeHog', 'modelMigrationStorm',
+    'modelGstOSwin', 'modelNodeHog', 'modelMigrationStorm',
 ])
 def test_Render_VMtemplate_PreservesPresetValuesAndExplicitDVname(
     preset: str,
 ) -> None:
-    settings = dict(getattr(PresetCtx, preset))
+    settings = PresetCtx.modelGstOSwin | getattr(PresetCtx, preset)
     context = REQUIRED_VM_CONTEXT | settings | {
         'vmName': 'native-vm', 'vmDataVolumeName': 'explicit-system-disk',
     }

@@ -30,6 +30,99 @@ from libs.Utils.CmdExec import CmdRes
 import Utils
 
 
+@pytest.mark.parametrize('private', ['', ' \t', '$UNIT_EMPTY_KEY'])
+def test__ResolveSSHkeys_BlankExpandedPrivate_ReviewRegression(
+    monkeypatch: pytest.MonkeyPatch,
+    private: str,
+) -> None:
+    monkeypatch.setenv('UNIT_EMPTY_KEY', '')
+    executor = mock.Mock()
+    monkeypatch.setattr(MUT, 'CmdExec', executor)
+    cfg = MUT._DEF__FXT_CFG | NamedDict(fxtInf=NamedDict(gstCfg=NamedDict(
+        usrCrd=NamedDict(sshKey=NamedDict(prv=private, pub='literal.pub')),
+    )))
+    with pytest.raises(ValueError, match='can not be empty'):
+        MUT._ResolveSSHkeys(cfg, [])
+    executor.assert_not_called()
+
+
+@pytest.mark.usefixtures('localPreparation')
+@pytest.mark.parametrize('ocConfig,vcConfig', [
+    ({}, {}),
+    ({'kubeconfig': 'oc-explicit'}, {'kubeconfig': 'vc-explicit'}),
+])
+def test_VMcreate_ClientKubeconfig_ReviewRegression(
+    monkeypatch: pytest.MonkeyPatch,
+    ocConfig: dict,
+    vcConfig: dict,
+) -> None:
+    monkeypatch.setattr(OCcli, 'GetResUID', mock.Mock(
+        return_value=(True, 'reuse-uid', ''),
+    ))
+    monkeypatch.setattr(MUT, 'VM', mock.Mock())
+    monkeypatch.setattr(MUT.Namespace, 'Create', mock.Mock())
+    cfg = MUT._DEF__FXT_CFG | NamedDict(
+        kCfg='fixture-config',
+        cliCfg=NamedDict(ocCfg=ocConfig, vcCfg=vcConfig),
+        fxtInf=NamedDict(vmCfg=NamedDict(reuseExisting=True, startVM=False)),
+    )
+    ocFactory = mock.Mock()
+    vcFactory = mock.Mock()
+    MUT.VMcreate(
+        Request(), MUT.FuncParsVMcreate(fxtCfgObj=cfg),
+        ocCLI=ocFactory, virtCtlCLI=vcFactory,
+    )
+    ocFactory.assert_called_once_with(
+        ns=cfg.ns, kubeconfig=cfg.kCfg,
+    )
+    vcFactory.assert_called_once_with(
+        ns=cfg.ns, kubeconfig=cfg.kCfg,
+    )
+
+
+@pytest.mark.parametrize('override', ['private-only', 'pair', 'unchanged'])
+def test_VMcreate_PrivateOverridePublicIdentity_ReviewRegression(
+    localContext: SimpleNamespace,
+    override: str,
+) -> None:
+    state = localContext
+    keyDirs = state.sshKeyDirs
+    base = MUT._ResolveSSHkeys(
+        MUT._DEF__FXT_CFG | NamedDict(_REGISTERED_CFG) | NamedDict(
+            fxtInf=NamedDict(vmCfg=NamedDict(ctxData={})),
+        ),
+        keyDirs,
+    )
+    before = ConfigSnapshot(base)
+    alternate = state.keyPath.parent / 'alternate-key'
+    alternate.write_text('unit-private-ed25519')
+    explicit = alternate.with_suffix('.pub')
+    explicit.write_text('ssh-ed25519 explicit-pair\n')
+    keys = NamedDict(prv=(
+        base.fxtInf.gstCfg.usrCrd.sshKey.prv if (override == 'unchanged')
+        else str(alternate)
+    ))
+    if (override == 'pair'): keys |= NamedDict(pub=str(explicit))
+    params = MUT.FuncParsVMcreate(fxtCfgObj=base, sshKeyDirs=keyDirs)
+    vms = MUT.VMcreate(
+        state.request, params, ocCLI=state.ocFactory,
+        virtCtlCLI=mock.Mock(),
+        fxtInf=NamedDict(gstCfg=NamedDict(usrCrd=NamedDict(sshKey=keys))),
+    )
+    expected = (
+        state.publicKey if (override == 'unchanged')
+        else (
+            'ssh-ed25519 explicit-pair\n' if (override == 'pair')
+            else 'ssh-ed25519 unit-public-alternate-key\n'
+        )
+    )
+    assert (base64.b64encode(expected.encode()).decode() in (
+        yaml.safe_dump(state.resources[-1])
+    ))
+    assert (vms[0].sshKey == keys.prv)
+    assert (ConfigSnapshot(base) == before)
+
+
 @pytest.mark.usefixtures('localPreparation')
 def test_VMcreate_ResourceHandlersReceiveNamedDictAndSharedOwnership(
     monkeypatch: pytest.MonkeyPatch,
@@ -1251,12 +1344,14 @@ def test_VMcreate_BatchReturnsNewVMsAndAppendsConfirmedOwnership(
         mock.call(Path('/repo/conf/VM/template.yaml'), mock.ANY),
     ])
     assert (ocFactory.call_args_list == [
-        mock.call(ns='default', context='oc-context'),
-        mock.call(ns='default', context='oc-context'),
+        mock.call(ns='default', kubeconfig=MUT._DEF__FXT_CFG.kCfg,
+                  context='oc-context'),
+        mock.call(ns='default', kubeconfig=MUT._DEF__FXT_CFG.kCfg,
+                  context='oc-context'),
     ])
     assert (virtCtlFactory.call_args_list == [
-        mock.call(ns='default', kubeconfig='/virt-kubeconfig'),
-        mock.call(ns='default', kubeconfig='/virt-kubeconfig'),
+        mock.call(ns='default', kubeconfig=MUT._DEF__FXT_CFG.kCfg),
+        mock.call(ns='default', kubeconfig=MUT._DEF__FXT_CFG.kCfg),
     ])
     ocZero.vmNewRes.assert_called_once_with(
         mock.ANY, checkExist=True, isSecret=False, waitTime='4m',
@@ -1534,12 +1629,13 @@ def test_VMcreate_NestedOverridesDoNotMutateDefaults(
         dict(MUT._DEF__FXT_CFG.fxtInf.gstCfg.usrCrd),
     ) == defaultNestedValues)
     assert (ocFactory.call_args_list == [
-        mock.call(ns='default', context='custom'),
-        mock.call(ns='default'),
+        mock.call(ns='default', kubeconfig=MUT._DEF__FXT_CFG.kCfg,
+                  context='custom'),
+        mock.call(ns='default', kubeconfig=MUT._DEF__FXT_CFG.kCfg),
     ])
     assert (virtCtlFactory.call_args_list == [
-        mock.call(ns='default'),
-        mock.call(ns='default'),
+        mock.call(ns='default', kubeconfig=MUT._DEF__FXT_CFG.kCfg),
+        mock.call(ns='default', kubeconfig=MUT._DEF__FXT_CFG.kCfg),
     ])
     assert (MUT.VM.call_args_list[0].kwargs['sshUsr'] == 'custom-user')
     assert (MUT.VM.call_args_list[0].kwargs['sshKey'] == \
@@ -1632,11 +1728,12 @@ def test_FxtVM_InitialSuccessUsesSelectedConfigAndCleansOnClose(
     assert (bundle.vmList == [vm])
     ocFactory.assert_called_once_with(
         ns='initial-ns',
+        kubeconfig=MUT._DEF__FXT_CFG.kCfg,
         context='initial-context',
     )
     virtCtlFactory.assert_called_once_with(
         ns='initial-ns',
-        kubeconfig='/initial-config',
+        kubeconfig=MUT._DEF__FXT_CFG.kCfg,
     )
     MUT.YAMLcfg.Render.assert_called_once_with(
         Path('/repo/conf/VM/initial.yaml'),
@@ -1815,11 +1912,12 @@ def test_FxtVM_VMcreateAllowsCLIOverrides(
     assert (created == [MUT.VM.return_value])
     selectedOC.assert_called_once_with(
         ns='selected-ns',
+        kubeconfig=MUT._DEF__FXT_CFG.kCfg,
         context='selected-context',
     )
     selectedVirtCtl.assert_called_once_with(
         ns='selected-ns',
-        kubeconfig='/selected-config',
+        kubeconfig=MUT._DEF__FXT_CFG.kCfg,
     )
     defaultOC.assert_not_called()
     defaultVirtCtl.assert_not_called()
@@ -2486,7 +2584,8 @@ def test_VMcreate_ActualRenderRawS3PublicKeyAndClientContext(
         assert (command[(command.index('--context') + 1)] == 'fixture-context')
         if (command[0] == 'oc-unit'):
             assert (
-                command[(command.index('--kubeconfig') + 1)] == '/mock/config'
+                command[(command.index('--kubeconfig') + 1)] ==
+                state.cfg['kCfg']
             )
     assert all((client.cmdExec is state.recorder) for client in state.clients)
     retained = repr(state.recorder.inputs) + caplog.text
@@ -2543,8 +2642,7 @@ def test_VMcreate_EmptyValuesFailBeforeResourceEffects(
     with pytest.raises(ValueError) as caught:
         Create(state)
     expected = (
-        'Public Key resolution failed'
-        if ((fldPath[-1] == 'prv') and (badValue == ''))
+        'can not be empty' if ((fldPath[-1] == 'prv') and (badValue == ''))
         else fldPath[-1]
     )
     assert (expected in str(caught.value))
@@ -4805,6 +4903,13 @@ def test__ResolveSSHkeys_DotPrivateUsesSuppliedPublicLiterally(
     )
     before = json.dumps(cfg)
 
+    if (prv in ('', '$VMCTX__EMPTY')):
+        with pytest.raises(ValueError, match='can not be empty'):
+            MUT._ResolveSSHkeys(cfg, sshKeyDirs)
+        assert (sshKeyDirs == [])
+        assert (pub.read_bytes() == b' opaque public\r\n')
+        assert (json.dumps(cfg) == before)
+        return
     result = MUT._ResolveSSHkeys(cfg, sshKeyDirs)
 
     assert (result.fxtInf.gstCfg.usrCrd.sshKey.prv == '.')
@@ -4833,6 +4938,13 @@ def test__ResolveSSHkeys_DotPrivateDerivationFailsNatively(
     )
     before = json.dumps(cfg)
 
+    if (prv in ('', '$VMCTX__EMPTY')):
+        with pytest.raises(ValueError, match='can not be empty'):
+            MUT._ResolveSSHkeys(cfg, sshKeyDirs)
+        assert (sshKeyDirs == [])
+        assert (json.dumps(cfg) == before)
+        assert ('Load key' not in caplog.text)
+        return
     with pytest.raises(ValueError, match='Public Key resolution failed'):
         MUT._ResolveSSHkeys(cfg, sshKeyDirs)
 
@@ -4871,6 +4983,17 @@ def test_FxtVM_DotPrivateUsesLiteralPublicAndConsumerIdentity(
     )))
     cfgBefore = json.dumps(override)
     try:
+        if (prv in ('', '$VMCTX__EMPTY')):
+            with pytest.raises(ValueError, match='can not be empty'):
+                bundle.vmCreate(fxtInf=NamedDict(
+                    vmCfg=NamedDict(count=1), gstCfg=override,
+                ))
+            assert (state.resources == [])
+            assert ((state.genCalls, state.keyCalls) == calls)
+            assert (ConfigSnapshot(base) == before)
+            assert (json.dumps(override) == cfgBefore)
+            assert (pub.read_bytes() == text.encode())
+            return
         vm = bundle.vmCreate(
             fxtInf=NamedDict(vmCfg=NamedDict(count=1), gstCfg=override),
         )[0]

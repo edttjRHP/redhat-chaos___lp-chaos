@@ -135,6 +135,13 @@ def _ResolveSSHkeys(
     :raises OSError:    Temporary directory creation or permission setup fails.
     '''
     sshKey = fxtCfg.fxtInf.gstCfg.usrCrd.sshKey
+    if (sshKey.prv is not None):
+        prvKeyStr = os.path.expandvars(sshKey.prv)
+        if not prvKeyStr.strip():
+            raise ValueError(
+                'The `fxtInf.gstCfg.usrCrd.sshKey.prv` can not be empty '
+                'string.'
+            )
     if ((sshKey.prv is None) or (sshKey.pub is None)):
         dir = TemporaryDirectory(prefix='fxtVM--ssh--')
         sshKeyDirs.append(dir)
@@ -155,12 +162,7 @@ def _ResolveSSHkeys(
                 '`fxtInf.gstCfg.usrCrd.sshKey`: Key generation failed.'
             ) from None
     else:
-        prvKey = Path(os.path.expandvars(sshKey.prv)).expanduser()
-        if not str(prvKey).strip():
-            raise ValueError(
-                'The `fxtInf.gstCfg.usrCrd.sshKey.prv` can not be empty '
-                'string.'
-            )
+        prvKey = Path(prvKeyStr).expanduser()
         if (sshKey.pub is None):
             pubKey = Path(dir.name) / (prvKey.name + '.pub')
             try:
@@ -234,7 +236,19 @@ def VMcreate(
         Resource resolution, VM provisioning and/or startup failed.
     '''
     fxtCfg = fPars.fxtCfgObj | NamedDict(fxtCfgArgs)
-    if fxtCfgArgs: fxtCfg = _ResolveSSHkeys(fxtCfg, fPars.sshKeyDirs)
+    if fxtCfgArgs:
+        keyArgs = fxtCfgArgs.get('fxtInf', {}).get('gstCfg', {}).get(
+            'usrCrd', {},
+        ).get('sshKey', {})
+        if (
+            ('prv' in keyArgs) and
+            ('pub' not in keyArgs) and
+            (keyArgs['prv'] != fPars.fxtCfgObj.fxtInf.gstCfg.usrCrd.sshKey.prv)
+        ):
+            fxtCfg |= NamedDict(fxtInf=NamedDict(gstCfg=NamedDict(
+                usrCrd=NamedDict(sshKey=NamedDict(pub=None))
+            )))
+        fxtCfg = _ResolveSSHkeys(fxtCfg, fPars.sshKeyDirs)
 
     vmCount = fxtCfg.fxtInf.vmCfg.count
     if (vmCount < 0): raise ValueError('VM count must not be negative.')
@@ -255,7 +269,7 @@ def VMcreate(
             f'{fxtCfg.fxtInf.vmCfg.namePfx}'
             f"{f'-{idx:0{sfxLen}d}' if (vmCount > 1) else ''}"
         )
-        oc = ocCLI(ns=ns, **fxtCfg.cliCfg.ocCfg)
+        oc = ocCLI(ns=ns, **{**fxtCfg.cliCfg.ocCfg, 'kubeconfig': fxtCfg.kCfg})
         if (idx == 0):
             Namespace.Create(
                 oc,
@@ -421,7 +435,9 @@ def VMcreate(
             name=vmName,
             ns=ns,
             oc=oc,
-            virtCtl=virtCtlCLI(ns=ns, **fxtCfg.cliCfg.vcCfg),
+            virtCtl=virtCtlCLI(
+                ns=ns, **{**fxtCfg.cliCfg.vcCfg, 'kubeconfig': fxtCfg.kCfg},
+            ),
             **(fxtCfg.fxtInf.gstCfg.usrCrd + {'sshKey': sshKey.prv}),
         ))
         fPars.vmList.append(newVMs[-1])

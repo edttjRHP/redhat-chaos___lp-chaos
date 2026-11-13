@@ -10,6 +10,39 @@ from libs.Utils.CmdExec import CmdRes
 import Utils
 
 
+@pytest.mark.parametrize('teardown', ['close', 'resume', 'primary'])
+@pytest.mark.parametrize('sshFailure', [False, True])
+def test_CleanUpVMs_RealHelpersOnGeneratorExit_ReviewRegression(
+    teardown: str,
+    sshFailure: bool,
+) -> None:
+    cli = OCmock()
+    cli.GetResUID.return_value = (True, 'owned-uid', '')
+    cli.DelRes.return_value = (OCcli.ResPhase.DELETED, CommandResult(False))
+    vm = SimpleNamespace(name='owned', RmvSSH=mock.Mock(
+        side_effect=RuntimeError('SSH failed') if sshFailure else None,
+    ))
+
+    def Fixture():
+        try: yield
+        finally:
+            MUT.VM.CleanUpVMs(
+                [vm], [(cli, 'VirtualMachine/owned', 'owned-uid')],
+            )
+
+    generator = Fixture()
+    next(generator)
+    error = RuntimeError('primary')
+    with pytest.raises(RuntimeError) as caught:
+        if (teardown == 'close'): generator.close()
+        elif (teardown == 'resume'): next(generator)
+        else: generator.throw(error)
+    if (teardown == 'primary'): assert (caught.value is error)
+    else: assert ('VM cleanup failed' in str(caught.value))
+    vm.RmvSSH.assert_called_once_with()
+    cli.DelRes.assert_called_once_with('VirtualMachine/owned')
+
+
 def CommandResult(
     success: bool,
     stdout: str = '',
@@ -103,15 +136,19 @@ def test_Init_CreatesDefaultClients(monkeypatch: pytest.MonkeyPatch) -> None:
     assert (vm.cli.virtCtl is MUT.VirtCtlCLI.return_value)
 
 
+@pytest.mark.parametrize('stdout', [
+    'Running', "'Running'", " \t'Running'\n", '',
+])
 def test__Status_ReturnsValueOnlyForSuccess(
     virtualMachine: Utils.VMcontext,
+    stdout: str,
 ) -> None:
-    virtualMachine.oc.Run.return_value = CommandResult(True, "'Running'")
-    assert (virtualMachine.vm._Status() == 'Running')
+    virtualMachine.oc.Run.return_value = CommandResult(True, stdout)
+    assert (virtualMachine.vm._Status() == stdout)
     virtualMachine.oc.Run.assert_called_once_with(
         'get',
         'VirtualMachine/vm-one',
-        o="jsonpath='{.status.printableStatus}'",
+        o='jsonpath={.status.printableStatus}',
     )
 
     virtualMachine.oc.Run.return_value = CommandResult(False, "'Stopped'")
@@ -142,7 +179,9 @@ def test_Start_SkipsNativeStartButWaitsForActiveVM(
     assert (result is waitSuccess)
     virtualMachine.virtCtl.Run.assert_not_called()
     virtualMachine.oc.Run.assert_called_once_with(
-        'wait', 'VirtualMachine/vm-one', **{'for': 'condition=Ready'},
+        'wait',
+        'VirtualMachine/vm-one',
+        **{'for': 'condition=Ready'},
         timeout='5m' if (timeout is None) else timeout,
     )
 
@@ -178,7 +217,9 @@ def test_Start_WaitsOnlyAfterNativeStartSucceeds(
     if (not startSuccess): virtualMachine.oc.Run.assert_not_called()
     else:
         virtualMachine.oc.Run.assert_called_once_with(
-            'wait', 'VirtualMachine/vm-one', **{'for': 'condition=Ready'},
+            'wait',
+            'VirtualMachine/vm-one',
+            **{'for': 'condition=Ready'},
             timeout='5m' if (timeout is None) else timeout,
         )
 

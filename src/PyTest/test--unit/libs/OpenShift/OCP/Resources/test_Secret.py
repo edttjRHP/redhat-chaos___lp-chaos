@@ -16,6 +16,77 @@ import libs.OpenShift.OCP.Resources.Secret as MUT
 from libs.Utils.CmdExec import CmdRes
 
 
+def test_Create_InitialParserFailureIsPrivate_ReviewRegression(
+    resourceCLI: mock.MagicMock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with pytest.raises(RuntimeError, match='Invalid Secret conf') as err:
+        MUT.Create(resourceCLI, ResCfg(yaml='kind: Secret\ndata: [private'))
+    assert (str(err.value) == 'Invalid Secret conf. (details are suppressed).')
+    assert ('private' not in str(err.value).replace('private details', ''))
+    assert ('[private' not in caplog.text)
+    assert err.value.__suppress_context__
+    resourceCLI.NewRes.assert_not_called()
+    resourceCLI.EnsureRes.assert_not_called()
+
+
+@pytest.mark.parametrize('authoritative', [False, True])
+@pytest.mark.parametrize('data', ['!!!!', 'YQ=', 'YQ==\n', 'é'])
+def test_Create_InvalidDesiredBase64_ReviewRegression(
+    secretContext: SimpleNamespace,
+    authoritative: bool,
+    data: str,
+) -> None:
+    cfg = (
+        ResCfg(yaml=yaml.safe_dump({
+            'kind': 'Secret', 'metadata': {'name': 'image-access'},
+            'data': {'key': data},
+        })) if authoritative
+        else ResCfg(
+            meta=NamedDict(name='image-access'),
+            spec=NamedDict(data={'key': data}),
+        )
+    )
+    with pytest.raises(RuntimeError, match='Could not prepare Secret'):
+        MUT.Create(secretContext.cli, cfg)
+    assert (secretContext.directories == [])
+    secretContext.cli.NewRes.assert_not_called()
+    secretContext.cli.EnsureRes.assert_not_called()
+
+
+@pytest.mark.parametrize('authoritative', [False, True])
+@pytest.mark.parametrize('data', ['', 'YQ=='])
+def test_Create_ValidDesiredBase64_ReviewRegression(
+    resourceCLI: mock.MagicMock,
+    authoritative: bool,
+    data: str,
+) -> None:
+    cfg = (
+        ResCfg(yaml=yaml.safe_dump({
+            'kind': 'Secret', 'metadata': {'name': 'image-access'},
+            'data': {'key': data},
+        })) if authoritative
+        else ResCfg(
+            meta=NamedDict(name='image-access'),
+            spec=NamedDict(data={'key': data}),
+        )
+    )
+    def Create(producer, **options):
+        assert options['isSecret']
+        if not authoritative:
+            source = next(csv.reader([producer['opts']['from-file']]))[0]
+            (key, filename) = source.split('=', 1)
+            assert (key == 'key')
+            assert (Path(filename).read_bytes() == base64.b64decode(data))
+        return (OCcli.ResPhase.APPLIED, CmdRes('', '', 0, True), {
+            'data': {'key': data},
+        })
+    resourceCLI.NewRes.side_effect = Create
+    result = MUT.Create(resourceCLI, cfg)
+    assert (result['data'] == {'key': data})
+    resourceCLI.NewRes.assert_called_once()
+
+
 @pytest.fixture(name='secretContext')
 def SecretContext(
     resourceCLI: mock.MagicMock,

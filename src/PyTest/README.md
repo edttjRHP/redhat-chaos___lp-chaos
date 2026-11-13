@@ -101,7 +101,7 @@ benchmark-runner, and Krkn fixtures for scenario tests. Use indirect parametriza
 - `krkn`: [Krkn examples](test--suites/ts--example/test_Krkn.py) are skipped launcher-Pod/host-observation placeholders.
 
 Adapt all environment-specific values. No current example implements a complete BSOD detection/analysis workflow. See the
-[BSOD roadmap](docs/roadmap--krkn-lib-bsod.md) for planned work.
+[BSOD roadmap](docs/roadmap--krkn--bsod.md) for planned work.
 
 
 ## Discovery and Offline Unit Tests

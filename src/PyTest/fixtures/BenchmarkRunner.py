@@ -153,11 +153,16 @@ def VMcreateByBR(
         'RUN_ARTIFACTS_PATH': (
             os.environ.get('RUN_ARTIFACTS_PATH') or tempfile.mkdtemp()
         ),
+        'SCALE_NODES': (os.environ.get('SCALE_NODES', '')),
         'UUID': invocationUUID,
     }
     if isScale:
         env['SCALE'] = str(vmCount)
-        env['SCALE_NODES'] = str([os.environ.get('WORKER_NODE')])
+        if (env['SCALE_NODES'] == ''):
+            raise ValueError(
+                'Env. Var. `SCALE_NODES` must set to non-empty string for '
+                'scale.'
+            )
     else:
         env['SCALE'] = ''
         env['SCALE_NODES'] = ''
@@ -273,7 +278,7 @@ def FxtVMbyBR(
     VMs live until module teardown. Setup blocks (it is not a non-blocking job
     API) until the separate runner process and default startup/Ready waits end
     not guaranteeing SSH connection to the Guest OS.
-    Prepare the workload/image and Namespace (set WORKER_NODE for scale).
+    Prepare the workload/image and Namespace (set `SCALE_NODES` for scale).
     Existing generated VM names cause failure, not reused.
     A `RUN_ARTIFACTS_PATH` / `ssh` / `vm_key` artifact overrides `sshKey` when
     present. The guest must have been pre-prepared to authorize its matching

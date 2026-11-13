@@ -231,9 +231,9 @@ class OCcli(GoCobraCLI):
         else:
             # Sub-command path: oc create <subCmd> *args **opts --dry-run ...
             createOpts = {
-                'isSecret': isSecret,
                 **resYAMLorSubCmd.get('opts', {}),
                 'dry_run': 'client', 'o': 'yaml', 'save_config': True,
+                'isSecret': isSecret,
             }
             dryRun = self.Run(
                 f"create {resYAMLorSubCmd['subCmd']}",
@@ -409,7 +409,9 @@ class OCcli(GoCobraCLI):
                 logs.exception('Could not clean up resource `%s`.', resRef)
         if clnFail:
             clnErr = 'Resource cleanup failed: ' + '; '.join(clnFail)
-            if (primExc is None): raise RuntimeError(clnErr)
+            if (
+                (primExc is None) or isinstance(primExc, GeneratorExit)
+            ): raise RuntimeError(clnErr)
             logs.error('%s; preserving primary exception.', clnErr)
 
     def DelRes(

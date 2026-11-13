@@ -17,7 +17,7 @@ def test_Chaos(fxtKrkn: FxtObjKrkn) -> None:
 
 Select and configure the scenario for your test, assert the expected CUT recovery, and provide appropriate cleanup. This is a usage example, not a portable
 acceptance test. Both repository `krkn` example tests are skipped placeholders. See the complete
-[fixture configuration and parametrization](../fixtures/Krkn.py#L305) and [runner API reference](../fixtures/Krkn.py#L121) for all parameters and returned
+[fixture configuration and parametrization](../fixtures/Krkn.py#L309) and [runner API reference](../fixtures/Krkn.py#L121) for all parameters and returned
 values.
 
 

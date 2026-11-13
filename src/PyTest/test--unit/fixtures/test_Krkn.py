@@ -295,6 +295,9 @@ def HubContext(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> NamedDict:
     scnDir = kHubRoot / 'pod-scenarios'
     krknRoot = tmp_path / 'krkn root'
     scnDir.mkdir(parents=True)
+    (scnDir / 'Dockerfile.template').write_text(
+        'LABEL krknctl.is_a_scenario=true\n'
+    )
     krknRoot.mkdir()
     runRoot = tmp_path / 'runs'
     runDir = runRoot / '20260203T040506Z--pod-scenarios'
@@ -353,6 +356,194 @@ def HubContext(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> NamedDict:
         cfgFile=runDir / 'config/chaos.yaml',
         runRoot=runRoot, runDir=runDir, clock=clock,
     )
+
+
+@pytest.mark.parametrize(('scnName', 'descriptor'), [
+    ('dummy-scenario', 'LABEL krknctl.is_a_scenario=true\n'),
+    ('pod-scenarios', None),
+    ('pod-scenarios', 'FROM scratch\n'),
+    ('pod-scenarios', 'LABEL krknctl.is_a_scenario=false\n'),
+])
+def test_Run_RejectsInvalidScenariosBeforeSourcingOrCreatingArtifacts(
+    hubContext: NamedDict,
+    monkeypatch: pytest.MonkeyPatch,
+    scnName: str,
+    descriptor: str | None,
+) -> None:
+    context = hubContext
+    scnDir = context.kHubRoot / scnName
+    if (scnDir != context.scnDir): context.scnDir.rename(scnDir)
+    dockerfile = scnDir / 'Dockerfile.template'
+    if (descriptor is None): dockerfile.unlink()
+    else: dockerfile.write_text(descriptor)
+    source = mock.Mock(wraps=MUT.DoShellSource)
+    monkeypatch.setattr(MUT, 'DoShellSource', source)
+    beforeEnv = dict(os.environ)
+    beforeCwd = Path.cwd()
+    with pytest.raises(AssertionError):
+        context.hub.Run(scnName)
+    source.assert_not_called()
+    assert not context.runRoot.exists()
+    assert (dict(os.environ) == beforeEnv)
+    assert (Path.cwd() == beforeCwd)
+
+
+@pytest.mark.parametrize('descriptor', [
+    'LABEL krknctl.is_a_scenario=true\n',
+    "LABEL krknctl.is_a_scenario='true'\n",
+    'FROM scratch\n  label KRKNCTL.IS_A_SCENARIO = "TRUE"  \n',
+])
+def test_Run_AcceptsScenarioLabelForms(
+    hubContext: NamedDict,
+    descriptor: str,
+) -> None:
+    context = hubContext
+    (context.scnDir / 'Dockerfile.template').write_text(descriptor)
+    result = context.hub.Run('pod-scenarios')
+    assert (result['observed'][-1] == 'root-scenario')
+    assert context.scnFile.is_file()
+    assert context.cfgFile.is_file()
+
+
+@pytest.mark.parametrize('name', [
+    '../outside', '/outside', 'a/../b', 'a/..', '..',
+])
+def test_Run_RejectsLexicalScenarioBeforeEffects_ReviewRegression(
+    hubContext: NamedDict,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    ctx = hubContext
+    if name.startswith('/'):
+        name = str(ctx.kHubRoot.parent / 'outside')
+    candidate = ctx.kHubRoot / name
+    candidate.mkdir(parents=True, exist_ok=True)
+    (candidate / 'Dockerfile.template').write_text(
+        'LABEL krknctl.is_a_scenario=true\n',
+    )
+    environment = mock.Mock()
+    source = mock.Mock()
+    executor = mock.Mock()
+    descriptor = mock.Mock(side_effect=AssertionError('descriptor was read'))
+    monkeypatch.setattr(MUT, 'TempEnv', environment)
+    monkeypatch.setattr(MUT, 'DoShellSource', source)
+    monkeypatch.setattr(MUT, 'CmdExec', executor)
+    monkeypatch.setattr(MUT.Path, 'read_text', descriptor)
+    with pytest.raises(AssertionError): ctx.hub.Run(name)
+    descriptor.assert_not_called()
+    environment.assert_not_called()
+    source.assert_not_called()
+    executor.assert_not_called()
+    assert not ctx.runRoot.exists()
+
+
+@pytest.mark.parametrize('name', [
+    Path('group/pod-scenarios'), Path('group/scenario'),
+    Path('foo..bar'), Path('group/..hidden'),
+])
+def test_Run_AcceptsNestedRelativePath_ReviewRegression(
+    hubContext: NamedDict,
+    name: Path,
+) -> None:
+    ctx = hubContext
+    nested = ctx.kHubRoot / name
+    nested.parent.mkdir(exist_ok=True)
+    ctx.scnDir.rename(nested)
+    result = ctx.hub.Run(name)
+    runDir = ctx.runRoot / ('20260203T040506Z--' + str(name))
+    assert (result['observed'][0] == runDir)
+    assert ((runDir / 'config/chaos.yaml').is_file())
+
+
+@pytest.mark.parametrize('configured,override,scriptValue', [
+    ('configured-config', None, None),
+    ('configured-config', 'call-config', None),
+    (None, None, 'script-config'),
+])
+def test_Run_InitialKubeconfigSeedAndLaterOverrides_ReviewRegression(
+    hubContext: NamedDict,
+    monkeypatch: pytest.MonkeyPatch,
+    configured: str | None,
+    override: str | None,
+    scriptValue: str | None,
+) -> None:
+    ctx = hubContext
+    monkeypatch.setenv('KRKN_KUBE_CONFIG', 'ambient-config')
+    with (ctx.kHubRoot / 'env.sh').open('a') as stream:
+        stream.write(
+            'export KRKN_TEST_KCFG_FROM_SEED="$KRKN_KUBE_CONFIG"\n'
+            'export KRKN_KUBE_CONFIG="${KRKN_KUBE_CONFIG:-hub-config}"\n'
+        )
+    if (scriptValue is not None):
+        with (ctx.scnDir / 'env.sh').open('a') as stream:
+            stream.write(f'export KRKN_KUBE_CONFIG={scriptValue}\n')
+    with (ctx.scnDir / 'selected.yaml.template').open('a') as stream:
+        stream.write('seed: "$KRKN_TEST_KCFG_FROM_SEED"\n')
+    with (ctx.kHubRoot / 'config.yaml.template').open('a') as stream:
+        stream.write('kubeconfig: "$KRKN_KUBE_CONFIG"\n')
+    originalSource = MUT.DoShellSource
+    sourced = []
+
+    def Source(**kwArgs: object) -> None:
+        sourced.append(os.environ.get('KRKN_KUBE_CONFIG'))
+        originalSource(**kwArgs)
+
+    monkeypatch.setattr(MUT, 'DoShellSource', Source)
+    config = {} if (configured is None) else {'KRKN_KUBE_CONFIG': configured}
+    overrides = {} if (override is None) else {'KRKN_KUBE_CONFIG': override}
+    beforeEnv = dict(os.environ)
+    result = ctx.hub.Run('pod-scenarios', overrides, fxtInf=NamedDict(
+        krknCfg=NamedDict(krknEnv=config),
+    ))
+    assert (sourced == ['fake-config'])
+    assert (ctx.scnFile.read_text().endswith('seed: "fake-config"\n'))
+    rendered = scriptValue or 'fake-config'
+    assert (ctx.cfgFile.read_text().endswith(f'kubeconfig: "{rendered}"\n'))
+    assert (result['observed'][3] == (override or configured or 'fake-config'))
+    assert (dict(os.environ) == beforeEnv)
+
+
+@pytest.mark.parametrize('label,accepted', [
+    (None, False), ('', False), ('LABEL krknctl.is_a_scenario=false', False),
+    ('LABEL other=true', False),
+    ('LABEL krknctl.is_a_scenario=true', True),
+    ('  label krknctl.is_a_scenario = "true"  ', True),
+    ("LABEL krknctl.is_a_scenario='true'", True),
+])
+def test_Run_ScenarioDescriptorBoundary_ReviewRegression(
+    hubContext: NamedDict,
+    monkeypatch: pytest.MonkeyPatch,
+    label: str | None,
+    accepted: bool,
+) -> None:
+    descriptor = hubContext.scnDir / 'Dockerfile.template'
+    source = mock.Mock(wraps=MUT.DoShellSource)
+    monkeypatch.setattr(MUT, 'DoShellSource', source)
+    if (label is None): descriptor.unlink()
+    else: descriptor.write_text(label + '\n')
+    if accepted:
+        hubContext.hub.Run('pod-scenarios')
+        assert hubContext.cfgFile.exists()
+    else:
+        with pytest.raises(AssertionError): hubContext.hub.Run('pod-scenarios')
+        source.assert_not_called()
+        assert not hubContext.runRoot.exists()
+
+
+def test_Run_RejectsDummyBeforeSource_ReviewRegression(
+    hubContext: NamedDict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dummy = hubContext.kHubRoot / 'dummy-scenario'
+    dummy.mkdir()
+    (dummy / 'Dockerfile.template').write_text(
+        'LABEL krknctl.is_a_scenario=true\n',
+    )
+    source = mock.Mock()
+    monkeypatch.setattr(MUT, 'DoShellSource', source)
+    with pytest.raises(AssertionError): hubContext.hub.Run('dummy-scenario')
+    source.assert_not_called()
+    assert not hubContext.runRoot.exists()
 
 
 @pytest.mark.parametrize('debug', [None, 'False', 'True', 'true', '1'])

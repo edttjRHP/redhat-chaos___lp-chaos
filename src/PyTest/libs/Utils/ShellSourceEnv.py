@@ -52,10 +52,16 @@ class BashEnv:
             'sys.stdout.write("\\n")'
         )
 
-        self.proc.stdin.write(
-            f'{shlex.quote(self.pyBin)} -c {shlex.quote(pyCode)}\n'
-        )
-        self.proc.stdin.flush()
+        try:
+            self.proc.stdin.write(
+                f'{shlex.quote(self.pyBin)} -c {shlex.quote(pyCode)} '
+                '|| exit $?\n'
+            )
+            self.proc.stdin.flush()
+        except BrokenPipeError as error:
+            raise RuntimeError(
+                'Bash exited before accepting a snapshot.'
+            ) from error
 
         line = self.proc.stdout.readline()
         if not line:
@@ -92,8 +98,10 @@ class BashEnv:
             while (chunk := envFile.read(65536)): self.proc.stdin.write(chunk)
             self.proc.stdin.write('\n} 0< /dev/null 1>&2 || exit $?\n')
         else:
+            envPath = os.fspath(envFile)
+            if ('/' not in envPath): envPath = './' + envPath
             self.proc.stdin.write(
-                f'source {shlex.quote(os.fspath(envFile))} 0< /dev/null 1>&2 '
+                f'source {shlex.quote(envPath)} 0< /dev/null 1>&2 '
                 '|| exit $?\n'
             )
         self.proc.stdin.flush()

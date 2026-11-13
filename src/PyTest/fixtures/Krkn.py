@@ -175,6 +175,7 @@ class KrknHub:
         kHubRoot = Path(fxtCfg.fxtInf.rootPath.krknHub).resolve()
         krknRoot = Path(fxtCfg.fxtInf.rootPath.krkn).resolve()
         krknRun = (krknRoot / krknScr).resolve()
+        assert (re.search(r'(^/|(^|/)\.\.(/|$))', str(scnName)) is None)
         scnDir = (kHubRoot / scnName).resolve()
         assert (
             (scnDir.name != 'dummy-scenario') and
@@ -186,12 +187,15 @@ class KrknHub:
                     r'(?im)^\s*LABEL\s+'
                     r'krknctl\.is_a_scenario\s*=\s*[\'"]?true[\'"]?\s*$'
                 ),
-                scnDockerfile.read_text(encoding="utf-8"),
+                scnDockerfile.read_text(encoding='utf-8'),
             )
         )
 
         with TempEnv():
-            UpdEnv(fxtCfg.fxtInf.krknCfg.krknEnv)
+            UpdEnv({
+                **fxtCfg.fxtInf.krknCfg.krknEnv,
+                'KRKN_KUBE_CONFIG': fxtCfg.kCfg,
+            })
             DoShellSource(envFiles=[kHubRoot / 'env.sh', scnDir / 'env.sh'])
 
 #           Krkn configuration items that referencing file or dir. have

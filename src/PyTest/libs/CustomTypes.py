@@ -3,6 +3,7 @@ from abc import ABCMeta
 from collections import defaultdict
 from enum import Enum, auto
 import os
+from reprlib import recursive_repr
 from typing import Any, Union, Optional, Type
 
 
@@ -333,6 +334,7 @@ class NestedDefDict(defaultdict):
         if (args and (args[0] is NestedDefDict)): args = args[1:]
         super().__init__(NestedDefDict, *args, **kwArgs)
 
+    @recursive_repr()
     def __repr__(self) -> str:
         '''
         Represent entries as an ordinary dictionary.

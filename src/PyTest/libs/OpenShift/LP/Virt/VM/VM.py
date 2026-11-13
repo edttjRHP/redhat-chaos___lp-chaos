@@ -65,7 +65,9 @@ class VM:
         except Exception as error: clnFail.append(str(error))
         if clnFail:
             clnErr = 'VM cleanup failed: ' + '; '.join(clnFail)
-            if (primExc is None): raise RuntimeError(clnErr)
+            if (
+                (primExc is None) or isinstance(primExc, GeneratorExit)
+            ): raise RuntimeError(clnErr)
             logs.error('%s; preserving primary exception: %s', clnErr, primExc)
 
     def __init__(
@@ -108,10 +110,11 @@ class VM:
     def _Status(self) -> str:
         '''Query the VM's current `printableStatus` via `oc get`.'''
         result = self.cli.oc.Run(
-            'get', f'VirtualMachine/{self.name}',
-            o="jsonpath='{.status.printableStatus}'",
+            'get',
+            f'VirtualMachine/{self.name}',
+            o='jsonpath={.status.printableStatus}',
         )
-        return result.stdout.strip("'") if result.success else ''
+        return result.stdout if result.success else ''
 
     def Start(
         self,

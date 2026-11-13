@@ -53,12 +53,17 @@ def Create(
     :raises SpecMismatch:
         Resolved Secret type or decoded data differs from the desired values.
     '''
-    _ValResCfg(
-        resCfg,
-        {'namespace', 'name'},
-        {'type', 'data', 'stringData'},
-        'Secret'
-    )
+    try:
+        _ValResCfg(
+            resCfg,
+            {'namespace', 'name'},
+            {'type', 'data', 'stringData'},
+            'Secret'
+        )
+    except yaml.YAMLError:
+        raise RuntimeError(
+            'Invalid Secret conf. (details are suppressed).'
+        ) from None
     try:
         if ((resYAML := resCfg.yaml) is None):
             ns = resCfg.meta.get('namespace')
@@ -67,7 +72,7 @@ def Create(
             spec = yaml.safe_load(resYAML)
         secretType = spec.get('type', 'Opaque')
         expData = {
-            key: base64.b64decode(val)
+            key: base64.b64decode(val, validate=True)
             for (key, val) in spec.get('data', {}).items()
         }
         expData.update({

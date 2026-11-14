@@ -28,7 +28,10 @@ class TestBR():
         },)],
         indirect=True,
     )
-    def test_VMcreate(self, fxtVMbyBR: 'FxtObjVMbyBR') -> None:
+    def test_VMcreateByBR_VMacceptsSSHcommands(
+        self,
+        fxtVMbyBR: 'FxtObjVMbyBR',
+    ) -> None:
         '''Create a VM then test its connectivity via SSH.'''
         testVM = fxtVMbyBR.vmList[0]
         logs.info(f'VM name: {testVM.name}')
@@ -64,7 +67,10 @@ class TestBR():
         [({'fxtInf': NamedDict(brCfg=NamedDict(count=2))},)],
         indirect=True,
     )
-    def test_BenchmarkRunner(self, fxtVMbyBR: 'FxtObjVMbyBR') -> None:
+    def test_BenchmarkRunner_CreatesTwoReadyVMs(
+        self,
+        fxtVMbyBR: 'FxtObjVMbyBR',
+    ) -> None:
         '''Create two distinct VMs and verify their Ready conditions.'''
         assert (len(fxtVMbyBR.vmList) == 2), (
             f'Expected 2 VMs created, got {len(fxtVMbyBR.vmList)}: '

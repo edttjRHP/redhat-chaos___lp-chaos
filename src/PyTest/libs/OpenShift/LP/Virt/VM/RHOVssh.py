@@ -6,7 +6,9 @@ from pathlib import Path
 import time
 from typing import Optional
 
+from libs.CustomTypes import NamedDict
 from libs.OpenShift.LP.Virt.CLI.VirtCtl import VirtCtlCLI
+from libs.OpenShift.OCP.CLI.OC import OCcli
 from libs.Utils.CmdExec import CmdExec, CmdRes
 
 
@@ -28,10 +30,14 @@ class RHOVsshCon:
         ctrlPersist: str = '4h',
         kubeconfig: Optional[str] = None,
         virtCtl: Optional['VirtCtlCLI'] = None,
+        oc: Optional[OCcli] = None,
         cmdExec: Optional[CmdExec] = None,
     ) -> None:
         '''
         Initialize the SSH ControlMaster connection settings.
+
+        Supplied clients and executor are reused. The Cluster UID is looked up
+        once during intantiation.
 
         :param ns:          Kubernetes Namespace where the target VM resides.
         :param host:        Name of the target VM.
@@ -42,28 +48,42 @@ class RHOVsshCon:
         :param kubeconfig:
             Optional path to `KUBECONFIG` file
             (default: read from Env. Var. `KUBECONFIG` or `None`).
-            Passed to `VirtCtlCLI` if no `virtCtl` is provided.
+            Passed to auto-created `OCcli` and `VirtCtlCLI` clients.
         :param virtCtl:
-            Optional `VirtCtlCLI` instance (default: auto-created
-            with `n=ns` and `kubeconfig` if provided).
+            Optional `VirtCtlCLI` instance (default: auto-created with `n=ns`
+            and `kubeconfig` if provided). Must address the same cluster as
+            `oc`.
+        :param oc:
+            Optional `OCcli` instance (default: auto-created with `n=ns` and
+            `kubeconfig` if provided). Must address the same cluster as
+            `virtCtl`.
         :param cmdExec:     Optional command executor instance.
+
+        :raises RuntimeError:
+            The cluster UID lookup fails or returns an empty UID.
         '''
         self.ns = ns
         self.host = host
         self.user = user
         self.idFile = str(Path(os.path.expandvars(idFile)).expanduser())
         self.ctrlPersist = ctrlPersist
-        kcfg = kubeconfig or os.environ.get('KUBECONFIG') or None
-        if virtCtl:
-            self.virtCtl = virtCtl
-        else:
-            kcOpts = {'kubeconfig': kcfg} if kcfg else {}
-            self.virtCtl = VirtCtlCLI(n=ns, **kcOpts)
-        self.cmdExec = cmdExec or CmdExec()
-        self.target = f'{user}@{host}.{ns}'
+        kCfg = kubeconfig or os.environ.get('KUBECONFIG') or None
+        if (cmdExec is None): cmdExec = CmdExec()
+        kcOpts = {'kubeconfig': kCfg} if kCfg else {}
+        if (oc is None): oc = OCcli(n=ns, **kcOpts)
+        if (virtCtl is None): virtCtl = VirtCtlCLI(n=ns, **kcOpts)
+        self.cli = NamedDict(cmdExec=cmdExec, oc=oc, virtCtl=virtCtl)
+        (lookupOK, clsID, lookupErr) = self.cli.oc.GetResUID(
+            'namespace/kube-system',
+        )
+        if (not lookupOK or not clsID):
+            raise RuntimeError(
+                f'Failed to obtain UID of namespace/kube-system: {lookupErr}'
+            )
+        self.target = f'{user}@{host}.{ns}.{clsID}'
         # In Linux, the UDF Socket full path is limited to 108 Bytes (with
         #   terminating `\0`.). To mitigate potential long names, bound to a
-        #   fix 80 Bytes hash.
+        #   fixed 80 Bytes path.
         self.ctrlPath = (
             '/tmp/ssh..'
             f'{hashlib.sha256(self.target.encode("utf-8")).hexdigest()}..sock'
@@ -75,7 +95,7 @@ class RHOVsshCon:
 
         :return:    True if the master connection is alive, False otherwise.
         '''
-        result = self.cmdExec.Run(
+        result = self.cli.cmdExec.Run(
             [
                 'ssh', '-O', 'check', '-o',
                 f'ControlPath={self.ctrlPath}', 'muxSock',
@@ -95,7 +115,7 @@ class RHOVsshCon:
 
         self.Close()    # Tear down any stale socket before re-establishing.
         logs.info(f'Establishing SSH ControlMaster tunnel to `{self.target}`.')
-        result = self.virtCtl.Run(
+        result = self.cli.virtCtl.Run(
             'ssh',
             '-t', '-o UserKnownHostsFile=/dev/null',
             '-t', '-o StrictHostKeyChecking=no',
@@ -114,7 +134,7 @@ class RHOVsshCon:
 
     def Close(self) -> None:
         '''Tear down the ControlMaster connection, if active.'''
-        self.cmdExec.Run(
+        self.cli.cmdExec.Run(
             [
                 'ssh', '-O', 'exit', '-o',
                 f'ControlPath={self.ctrlPath}', 'muxSock',
@@ -200,7 +220,7 @@ class RHOVsshCon:
             command,
         ]
         logs.info(f'Running remote command on {self.target}: {command}')
-        return self.cmdExec.Run(cmd, input=stdin)
+        return self.cli.cmdExec.Run(cmd, input=stdin)
 
     def RunPowerShell(self, script: str, interactive: bool = False) -> CmdRes:
         '''
@@ -238,7 +258,7 @@ class RHOVsshCon:
             f'muxSock:{remotePath}',
         ]
         logs.info(f'Copying {localPath} to {self.target}:{remotePath}')
-        return self.cmdExec.Run(cmd)
+        return self.cli.cmdExec.Run(cmd)
 
     def Recv(self, remotePath: Path, localPath: str) -> CmdRes:
         '''
@@ -258,4 +278,4 @@ class RHOVsshCon:
             str(localPath),
         ]
         logs.info(f'Downloading {self.target}:{remotePath} to {localPath}')
-        return self.cmdExec.Run(cmd)
+        return self.cli.cmdExec.Run(cmd)

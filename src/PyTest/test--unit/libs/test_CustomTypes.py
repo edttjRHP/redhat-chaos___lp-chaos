@@ -8,12 +8,26 @@ import pytest
 import libs.CustomTypes as MUT
 
 
-@pytest.mark.parametrize('direction', ['FromDict', 'ToDict'])
+@pytest.mark.parametrize('cycle', ['none', 'self', 'mutual'])
+def test_NestedDefDict_RecursiveRepr_ReviewRegression(cycle: str) -> None:
+    value = MUT.NestedDefDict()
+    value['ordinary'] = {'items': [1, 2]}
+    if (cycle == 'none'):
+        assert (repr(value) == "{'ordinary': {'items': [1, 2]}}")
+        return
+    if (cycle == 'self'): value['child'] = value
+    else:
+        other = MUT.NestedDefDict()
+        value['child'] = other
+        other['child'] = value
+    result = repr(value)
+    assert ('...' in result)
+    assert ("'ordinary': {'items': [1, 2]}" in result)
+    assert (repr(value) == result)
+
+
 @pytest.mark.parametrize('explicitMode', [False, True])
-def test_NestedConversion_ChainStopsAtListsAndTuples(
-    direction: str,
-    explicitMode: bool,
-) -> None:
+def test_FromDict_ChainStopsAtListsAndTuples(explicitMode: bool) -> None:
     leaf = object()
     blockedList = [{'nested': 1}]
     blockedTuple = (MUT.NamedDict(nested=2),)
@@ -21,15 +35,12 @@ def test_NestedConversion_ChainStopsAtListsAndTuples(
         child={'leaf': leaf}, listed=blockedList, paired=blockedTuple,
         empty={}, items={'keys': 3},
     )
-    converter = (
-        MUT.NamedDict.FromDict if (direction == 'FromDict') else source.ToDict
-    )
-    args = [source] if (direction == 'FromDict') else []
+    args = [source]
     if explicitMode: args.append(MUT.NamedDict.NestedMode.CHAIN)
 
-    result = converter(*args)
+    result = MUT.NamedDict.FromDict(*args)
 
-    expectedType = MUT.NamedDict if (direction == 'FromDict') else dict
+    expectedType = MUT.NamedDict
     assert (type(result) is expectedType)
     assert (type(result['child']) is expectedType)
     assert (type(result['empty']) is expectedType)
@@ -44,21 +55,75 @@ def test_NestedConversion_ChainStopsAtListsAndTuples(
     assert (type(blockedTuple[0]) is MUT.NamedDict)
 
 
-@pytest.mark.parametrize('direction', ['FromDict', 'ToDict'])
-def test_NestedConversion_AllPreservesKindsAndCopiesContainers(
-    direction: str,
-) -> None:
+@pytest.mark.parametrize('explicitMode', [False, True])
+def test_ToDict_ChainStopsAtListsAndTuples(explicitMode: bool) -> None:
+    leaf = object()
+    blockedList = [{'nested': 1}]
+    blockedTuple = (MUT.NamedDict(nested=2),)
+    source = MUT.NamedDict(
+        child={'leaf': leaf}, listed=blockedList, paired=blockedTuple,
+        empty={}, items={'keys': 3},
+    )
+    args = []
+    if explicitMode: args.append(MUT.NamedDict.NestedMode.CHAIN)
+
+    result = source.ToDict(*args)
+
+    expectedType = dict
+    assert (type(result) is expectedType)
+    assert (type(result['child']) is expectedType)
+    assert (type(result['empty']) is expectedType)
+    assert (type(result['items']) is expectedType)
+    assert (result is not source)
+    assert (result['child'] is not source.child)
+    assert (result['child']['leaf'] is leaf)
+    assert (result['listed'] is blockedList)
+    assert (result['paired'] is blockedTuple)
+    assert (type(source.child) is dict)
+    assert (type(blockedList[0]) is dict)
+    assert (type(blockedTuple[0]) is MUT.NamedDict)
+
+
+def test_FromDict_AllPreservesKindsAndCopiesContainers() -> None:
     leaf = object()
     source = MUT.NamedDict(
         child={'listed': [({'leaf': leaf},)]},
         named=MUT.NamedDict(value=1), emptyList=[], emptyTuple=(), empty={},
     )
-    if (direction == 'FromDict'):
-        result = MUT.NamedDict.FromDict(source, MUT.NamedDict.NestedMode.ALL)
-    else:
-        result = source.ToDict(MUT.NamedDict.NestedMode.ALL)
+    result = MUT.NamedDict.FromDict(source, MUT.NamedDict.NestedMode.ALL)
 
-    expectedType = MUT.NamedDict if (direction == 'FromDict') else dict
+    expectedType = MUT.NamedDict
+    assert (type(result) is expectedType)
+    assert (type(result['child']) is expectedType)
+    assert (type(result['named']) is expectedType)
+    assert (type(result['empty']) is expectedType)
+    assert (type(result['child']['listed']) is list)
+    assert (type(result['child']['listed'][0]) is tuple)
+    assert (type(result['child']['listed'][0][0]) is expectedType)
+    assert (result['child']['listed'][0][0]['leaf'] is leaf)
+    assert (result['emptyList'] == [])
+    assert (result['emptyTuple'] == ())
+    assert (type(result['emptyTuple']) is tuple)
+    assert (result is not source)
+    assert (result['child'] is not source.child)
+    assert (result['named'] is not source.named)
+    assert (result['empty'] is not source.empty)
+    assert (result['emptyList'] is not source.emptyList)
+    assert (result['child']['listed'] is not source.child['listed'])
+    assert (result['child']['listed'][0] is not source.child['listed'][0])
+    assert (type(source.child['listed'][0][0]) is dict)
+    assert (type(source.named) is MUT.NamedDict)
+
+
+def test_ToDict_AllPreservesKindsAndCopiesContainers() -> None:
+    leaf = object()
+    source = MUT.NamedDict(
+        child={'listed': [({'leaf': leaf},)]},
+        named=MUT.NamedDict(value=1), emptyList=[], emptyTuple=(), empty={},
+    )
+    result = source.ToDict(MUT.NamedDict.NestedMode.ALL)
+
+    expectedType = dict
     assert (type(result) is expectedType)
     assert (type(result['child']) is expectedType)
     assert (type(result['named']) is expectedType)
@@ -108,9 +173,13 @@ def test_FromDict_RejectsNonDictionaryRoot(data: object) -> None:
 
 
 @pytest.mark.parametrize('mode', [None, 'CHAIN', 'all', 1])
-def test_NestedConversion_RejectsInvalidMode(mode: object) -> None:
+def test_FromDict_RejectsInvalidMode(mode: object) -> None:
     with pytest.raises(TypeError, match='NamedDict.NestedMode member'):
         MUT.NamedDict.FromDict({}, mode)
+
+
+@pytest.mark.parametrize('mode', [None, 'CHAIN', 'all', 1])
+def test_ToDict_RejectsInvalidMode(mode: object) -> None:
     with pytest.raises(TypeError, match='NamedDict.NestedMode member'):
         MUT.NamedDict().ToDict(mode)
 
@@ -241,6 +310,109 @@ def test_Init_PreservesGeneratorEntries() -> None:
 
     assert (MUT.NamedDict(source) == {'first': 1, 'second': 2})
     assert (list(source) == [])
+
+
+@pytest.mark.parametrize('sourceKind', ['mapping', 'pairs', 'generator'])
+def test_update_PreservesShallowValuesAndKeywordPrecedence(
+    sourceKind: str,
+) -> None:
+    kept = object()
+    incoming = object()
+    override = object()
+    value = MUT.NamedDict(kept=kept, replaced='old')
+    entries = [('replaced', incoming), ('added', incoming)]
+    source = dict(entries) if (sourceKind == 'mapping') else entries
+    if (sourceKind == 'generator'): source = (pair for pair in entries)
+
+    result = value.update(source, added=override, self=incoming)
+
+    assert (result is None)
+    assert (value == {
+        'kept': kept, 'replaced': incoming,
+        'added': override, 'self': incoming,
+    })
+    assert (value.replaced is incoming)
+    assert (value.added is override)
+    assert ((value | MUT.NamedDict()) == value)
+    if (sourceKind == 'generator'): assert (list(source) == [])
+
+
+@pytest.mark.parametrize('sourceKind', ['mapping', 'pairs', 'generator'])
+@pytest.mark.parametrize('invalidKey', ['not-valid', 1])
+def test_update_RejectsInvalidKeysBeforeMutation(
+    sourceKind: str,
+    invalidKey: object,
+) -> None:
+    kept = object()
+    value = MUT.NamedDict(kept=kept)
+    entries = [('added', 1), ('___update___', 2), (invalidKey, 3)]
+    source = dict(entries) if (sourceKind == 'mapping') else entries
+    if (sourceKind == 'generator'): source = (pair for pair in entries)
+
+    with pytest.raises(KeyError, match='valid python identifier'):
+        value.update(source)
+
+    assert (value == {'kept': kept})
+    assert (value.kept is kept)
+    assert ((value | MUT.NamedDict()) == value)
+
+
+@pytest.mark.parametrize(('source', 'error'), [
+    (None, TypeError), ([('added', 1), ('broken',)], ValueError),
+])
+def test_update_RejectsInvalidArgumentsBeforeMutation(
+    source: object,
+    error: type[Exception],
+) -> None:
+    value = MUT.NamedDict(kept=1)
+    with pytest.raises(error):
+        value.update(source)
+    assert (value == {'kept': 1})
+
+
+def test_update_RejectsInvalidKeywordKeysBeforeMutation() -> None:
+    value = MUT.NamedDict(kept=1)
+    with pytest.raises(KeyError, match='valid python identifier'):
+        value.update(added=2, **{'not-valid': 3})
+    assert (value == {'kept': 1})
+
+
+@pytest.mark.parametrize('existing', [False, True])
+@pytest.mark.parametrize('default', [None, False, object()])
+def test_setdefault_PreservesExistingValuesAndDefaultIdentity(
+    existing: bool,
+    default: object,
+) -> None:
+    previous = object()
+    value = MUT.NamedDict(entry=previous) if existing else MUT.NamedDict()
+
+    result = value.setdefault('entry', default)
+
+    expected = previous if existing else default
+    assert (result is expected)
+    assert (value.entry is expected)
+    assert ((value | MUT.NamedDict()) == value)
+
+
+@pytest.mark.parametrize('invalidKey', ['not-valid', 1])
+def test_setdefault_RejectsInvalidKeysBeforeMutation(
+    invalidKey: object,
+) -> None:
+    value = MUT.NamedDict(kept=1)
+    with pytest.raises(KeyError, match='valid python identifier'):
+        value.setdefault(invalidKey, object())
+    assert (value == {'kept': 1})
+    assert ((value | MUT.NamedDict()) == value)
+
+
+def test_setdefault_PreservesPositionalOnlyAndMissingDefault() -> None:
+    value = MUT.NamedDict()
+    assert (value.setdefault('entry') is None)
+    assert (value == {'entry': None})
+    with pytest.raises(TypeError): value.setdefault(key='other')
+    with pytest.raises(TypeError): value.setdefault('other', default=1)
+    with pytest.raises(TypeError): value.setdefault([], 1)
+    assert (value == {'entry': None})
 
 
 def test_Update_PreservesGeneratorEntriesAndKeywordOverrides() -> None:

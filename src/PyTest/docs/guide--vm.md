@@ -12,7 +12,7 @@ extraVMs = fxtVM.vmCreate(
 )
 ```
 
-See the complete [fixture configuration and parametrization](../fixtures/VM.py#L459) and [factory API reference](../fixtures/VM.py#L189) for all parameters and
+See the complete [fixture configuration and parametrization](../fixtures/VM.py#L474) and [factory API reference](../fixtures/VM.py#L191) for all parameters and
 returned values.
 
 
@@ -103,5 +103,5 @@ raw OpenSSH public-key text in `sshPublicKeyB64`. The fixture fills these; direc
 | `vmFeatures__Hyperv_Tlbflush__Ena`                        | `False`                                                           |
 
 Keep context values native; the template serializes them at YAML insertion. Validate storage availability, names, quantities, source credentials, and guest
-compatibility for your environment. Optional [context presets](../fixtures/libs/VM/PresetCtx.py) include environment-specific storage/node values; adapt them
-before merging their `ToDict()` output into `ctxData`.
+compatibility for your environment. Optional [context presets](../fixtures/libs/VM/PresetCtx.py) include recommended VM settings to be used for specific use
+case. One or more (merged) of these settings can be used to pre-seed the `fxtInf.vmCfg.ctxData` in Fixture Configuration.

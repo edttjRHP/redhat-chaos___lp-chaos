@@ -37,6 +37,7 @@ _DEF__FXT_CFG = NamedDict(
         os.environ.get('KUBECONFIG') or
         os.path.expanduser('~/.kube/config')
     ),
+    # The `--kubeconfig` option will be overridden by the above `.kCfg`.
     cliCfg=NamedDict(
         ocCfg={},
         vcCfg={},
@@ -175,6 +176,7 @@ class KrknHub:
         kHubRoot = Path(fxtCfg.fxtInf.rootPath.krknHub).resolve()
         krknRoot = Path(fxtCfg.fxtInf.rootPath.krkn).resolve()
         krknRun = (krknRoot / krknScr).resolve()
+        assert (re.search(r'(^/|(^|/)\.\.(/|$))', str(scnName)) is None)
         scnDir = (kHubRoot / scnName).resolve()
         assert (
             (scnDir.name != 'dummy-scenario') and
@@ -186,12 +188,15 @@ class KrknHub:
                     r'(?im)^\s*LABEL\s+'
                     r'krknctl\.is_a_scenario\s*=\s*[\'"]?true[\'"]?\s*$'
                 ),
-                scnDockerfile.read_text(encoding="utf-8"),
+                scnDockerfile.read_text(encoding='utf-8'),
             )
         )
 
         with TempEnv():
-            UpdEnv(fxtCfg.fxtInf.krknCfg.krknEnv)
+            UpdEnv({
+                **fxtCfg.fxtInf.krknCfg.krknEnv,
+                'KRKN_KUBE_CONFIG': fxtCfg.kCfg,
+            })
             DoShellSource(envFiles=[kHubRoot / 'env.sh', scnDir / 'env.sh'])
 
 #           Krkn configuration items that referencing file or dir. have
@@ -291,11 +296,7 @@ class KrknHub:
                 return RunFromPath(
                     krknRun,
                     krknArgs,
-                    {
-                        'KRKN_KUBE_CONFIG': fxtCfg.kCfg,
-                        **fxtCfg.fxtInf.krknCfg.krknEnv,
-                        **(envVars or {})
-                    },
+                    (envVars or {}),
                     initGlb,
                     runName,
                 )
@@ -382,17 +383,23 @@ def FxtKrkn(
         'IENG_PYTEST____FXT__KRKN____OPTS',
         (request.config.rootpath / 'conf/Krkn/opts--krkn.yaml').resolve(),
     )).read_text()))
+    # The `GetEnvDelta()` omits unchanged exports (the currently inherited Env.
+    # Var. value is the same with the set value in `envFiles`). So if that Env.
+    # Var. also exist in `_DEF__FXT_CFG.fxtInf.krknCfg.krknEnv`, its value will
+    # become effective, instead of the one set in `envFiles`. So for each Env.
+    # Var. exist in `_DEF__FXT_CFG.fxtInf.krknCfg.krknEnv`, get the current
+    # inherited value first.
     fxtCfg = (
         _DEF__FXT_CFG |
-        NamedDict(fxtInf=NamedDict(krknCfg=(NamedDict(krknEnv=GetEnvDelta(
-            BashEnv,
-            [StringIO(fxtOpts.sourceFile.envVar)],
-        ))))) |
+        NamedDict(fxtInf=NamedDict(krknCfg=(NamedDict(krknEnv={
+            **{
+                key: os.environ[key]
+                for key in _DEF__FXT_CFG.fxtInf.krknCfg.krknEnv
+                if (key in os.environ)
+            },
+            **GetEnvDelta(BashEnv, [StringIO(fxtOpts.sourceFile.envVar)]),
+        })))) |
         NamedDict(**getattr(request, 'param', {}))
-    )
-
-    logs.info(
-        f'Initializing `krkn-lib` client with `KUBECONFIG`: {fxtCfg.kCfg}'
     )
 
     yield FxtObjKrkn(
@@ -400,8 +407,14 @@ def FxtKrkn(
         fxtInf=fxtCfg.fxtInf,
         testPars=fxtCfg.testPars,
         cli=NamedDict(
-            oc=fxtOCcli(ns=fxtCfg.ns, **fxtCfg.cliCfg.ocCfg),
-            virtCtl=fxtVirtCtlCLI(ns=fxtCfg.ns, **fxtCfg.cliCfg.vcCfg),
+            oc=fxtOCcli(
+                ns=fxtCfg.ns,
+                **{**fxtCfg.cliCfg.ocCfg, 'kubeconfig': fxtCfg.kCfg},
+            ),
+            virtCtl=fxtVirtCtlCLI(
+                ns=fxtCfg.ns,
+                **{**fxtCfg.cliCfg.vcCfg, 'kubeconfig': fxtCfg.kCfg},
+            ),
         ),
         ns=fxtCfg.ns,
     )

@@ -75,7 +75,7 @@ class CmdExec:
                     if warnOnFail:
                         detail = (
                             '[SNIPPED]' if isSecret
-                            else result.stderr.strip()
+                            else (result.stderr or '').strip()
                         )
                         logs.warning(
                             'Command failed with exit code '

@@ -13,6 +13,64 @@ from libs.OpenShift.OCP.CLI.OC import OCcli
 import Utils
 
 
+@pytest.mark.parametrize('count,scaleNodes,workerNode', [
+    (2, None, 'configured-worker'), (2, '', 'configured-worker'),
+    (2, "['worker-a']", None), (2, 'raw-nodes', 'configured-worker'),
+    (2, ' \t', 'configured-worker'),
+    (0, None, None), (0, '', None), (1, None, None), (1, '', None),
+])
+def test_VMcreateByBR_DirectScaleNodes_ReviewRegression(
+    monkeypatch: pytest.MonkeyPatch,
+    count: int,
+    scaleNodes: str | None,
+    workerNode: str | None,
+) -> None:
+    if (scaleNodes is None): monkeypatch.delenv('SCALE_NODES', raising=False)
+    else: monkeypatch.setenv('SCALE_NODES', scaleNodes)
+    monkeypatch.setenv('WORKER_NODE', 'ambient-worker')
+    runner = BenchmarkRunnerVenv('/synthetic/artifacts')
+    PatchRunner(monkeypatch, runner)
+    monkeypatch.setattr(MUT, 'VM', mock.Mock())
+    monkeypatch.setattr(OCcli, 'GetResUID', mock.Mock(side_effect=[
+        *((True, '', ''),) * count,
+        *((True, f'uid-{idx}', '') for idx in range(count)),
+    ]))
+    ocFactory = mock.Mock()
+    brEnv = {'SCALE_NODES': 'configured-nodes'}
+    if (workerNode is not None): brEnv['WORKER_NODE'] = workerNode
+    cfg = MUT._DEF__FXT_CFG | NamedDict(fxtInf=NamedDict(brCfg=NamedDict(
+        count=count, startVM=False, brEnv=brEnv,
+    )))
+    params = MUT.FuncParsVMcreateByBR(fxtCfgObj=cfg)
+    if ((count > 1) and (scaleNodes in (None, ''))):
+        with pytest.raises(ValueError) as caught:
+            MUT.VMcreateByBR(
+                None, params, ocCLI=ocFactory, virtCtlCLI=mock.Mock(),
+            )
+        assert (
+            str(caught.value) == (
+                'Env. Var. `SCALE_NODES` must set to non-empty string for '
+                'scale.'
+            )
+        )
+        runner.call.assert_not_called()
+        ocFactory.assert_not_called()
+        return
+    result = MUT.VMcreateByBR(
+        None, params, ocCLI=ocFactory, virtCtlCLI=mock.Mock(),
+    )
+    assert (len(result) == count)
+    if not count:
+        runner.call.assert_not_called()
+        ocFactory.assert_not_called()
+        return
+    env = runner.call.call_args.kwargs['envUpd']
+    assert (env['SCALE_NODES'] == (scaleNodes if (count > 1) else ''))
+    assert (env['SCALE'] == (str(count) if (count > 1) else ''))
+    if (workerNode is None): assert ('WORKER_NODE' not in env)
+    else: assert (env['WORKER_NODE'] == workerNode)
+
+
 class BenchmarkRunnerVenv:
     def __init__(self, artifactsPath: str) -> None:
         self.artifactsPath = artifactsPath
@@ -51,6 +109,7 @@ def test_FxtVMbyBR_StartTracksOwnershipAndPreservesFailures(
     outcome: str,
     customTimeout: str | None,
 ) -> None:
+    monkeypatch.setenv('SCALE_NODES', "['synthetic-worker']")
     Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
@@ -170,7 +229,10 @@ def test_FxtVMbyBR_RetainsSetupAndIsolatesTemporaryOverrides(
         'ns': 'setup-ns',
         'kCfg': '/setup/kubeconfig',
         'cliCfg': NamedDict(
-            ocCfg={'context': 'setup-context'},
+            ocCfg={
+                'context': 'setup-context',
+                'kubeconfig': '/setup-oc-config',
+            },
             vcCfg={'kubeconfig': '/setup-config'},
         ),
         'fxtInf': NamedDict(
@@ -229,14 +291,23 @@ def test_FxtVMbyBR_RetainsSetupAndIsolatesTemporaryOverrides(
         'call-ns', 'setup-ns', 'setup-ns',
     ])
     assert (ocFactory.call_args_list == [
-        mock.call(ns='call-ns', context='call-context'),
-        mock.call(ns='setup-ns', context='setup-context'),
-        mock.call(ns='setup-ns', context='setup-context'),
+        mock.call(
+            ns='call-ns', context='call-context',
+            kubeconfig='/call/kubeconfig',
+        ),
+        mock.call(
+            ns='setup-ns', context='setup-context',
+            kubeconfig='/setup/kubeconfig',
+        ),
+        mock.call(
+            ns='setup-ns', context='setup-context',
+            kubeconfig='/setup/kubeconfig',
+        ),
     ])
     assert (virtCtlFactory.call_args_list == [
-        mock.call(ns='call-ns', kubeconfig='/setup-config'),
-        mock.call(ns='setup-ns', kubeconfig='/setup-config'),
-        mock.call(ns='setup-ns', kubeconfig='/setup-config'),
+        mock.call(ns='call-ns', kubeconfig='/call/kubeconfig'),
+        mock.call(ns='setup-ns', kubeconfig='/setup/kubeconfig'),
+        mock.call(ns='setup-ns', kubeconfig='/setup/kubeconfig'),
     ])
     assert ([call.kwargs['sshUsr'] for call in MUT.VM.call_args_list] == [
         'call-user', 'setup-user', 'setup-user',
@@ -429,8 +500,13 @@ def test_VMcreateByBR_SingleVMhappyPathUsesGeneratedIdentityKey(
     assert (environment['UUID'] == str(MUT.uuid4.return_value))
     assert (environment['KUBECONFIG'] == MUT._DEF__FXT_CFG.kCfg)
     assert (environment['RUN_ARTIFACTS_PATH'] == '/artifacts')
-    ocFactory.assert_called_once_with(ns='default', context='oc-context')
-    virtCtlFactory.assert_called_once_with(ns='default')
+    ocFactory.assert_called_once_with(
+        ns='default', context='oc-context',
+        kubeconfig=MUT._DEF__FXT_CFG.kCfg,
+    )
+    virtCtlFactory.assert_called_once_with(
+        ns='default', kubeconfig=MUT._DEF__FXT_CFG.kCfg,
+    )
     MUT.VM.assert_called_once_with(
         name='windows-vm-12345678',
         ns='default',
@@ -451,6 +527,7 @@ def test_VMcreateByBR_ScalePathNamesVMsAndUsesFallbackKey(
 ) -> None:
     Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     monkeypatch.setenv('WORKER_NODE', 'worker-a')
+    monkeypatch.setenv('SCALE_NODES', "['worker-a']")
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
     Utils.AutoPatch(monkeypatch, MUT.Path, 'is_file')
@@ -568,12 +645,15 @@ def test_VMcreateByBR_NestedOverridesDoNotMutateDefaults(
         dict(MUT._DEF__FXT_CFG.fxtInf.gstCfg.usrCrd),
     ) == defaultNestedValues)
     assert (ocFactory.call_args_list == [
-        mock.call(ns='default', context='custom-context'),
-        mock.call(ns='default'),
+        mock.call(
+            ns='default', context='custom-context',
+            kubeconfig=MUT._DEF__FXT_CFG.kCfg,
+        ),
+        mock.call(ns='default', kubeconfig=MUT._DEF__FXT_CFG.kCfg),
     ])
     assert (virtCtlFactory.call_args_list == [
-        mock.call(ns='default', kubeconfig='/custom-config'),
-        mock.call(ns='default'),
+        mock.call(ns='default', kubeconfig=MUT._DEF__FXT_CFG.kCfg),
+        mock.call(ns='default', kubeconfig=MUT._DEF__FXT_CFG.kCfg),
     ])
     assert (MUT.VM.call_args_list[0].kwargs['sshUsr'] == 'custom-user')
     assert (MUT.VM.call_args_list[0].kwargs['sshKey'] == (
@@ -645,6 +725,7 @@ def test_VMcreateByBR_RunnerFailurePreservesPrimaryErrorDuringReconciliation(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    monkeypatch.setenv('SCALE_NODES', "['synthetic-worker']")
     Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
@@ -805,6 +886,7 @@ def test_FxtVMbyBR_InitialSuccessUsesSelectedConfigAndCleansOnClose(
     virtCtlFactory = mock.MagicMock()
     generator = MUT.FxtVMbyBR.__wrapped__(
         request=SimpleNamespace(param={
+            'kCfg': '/initial/kubeconfig',
             'cliCfg': NamedDict(
                 ocCfg={'context': 'initial-context'},
                 vcCfg={'kubeconfig': '/initial-config'},
@@ -824,10 +906,11 @@ def test_FxtVMbyBR_InitialSuccessUsesSelectedConfigAndCleansOnClose(
     ocFactory.assert_called_once_with(
         ns='initial-ns',
         context='initial-context',
+        kubeconfig='/initial/kubeconfig',
     )
     virtCtlFactory.assert_called_once_with(
         ns='initial-ns',
-        kubeconfig='/initial-config',
+        kubeconfig='/initial/kubeconfig',
     )
     generator.close()
     MUT.VM.CleanUpVMs.assert_called_once_with(
@@ -840,6 +923,7 @@ def test_FxtVMbyBR_InitialSuccessUsesSelectedConfigAndCleansOnClose(
 def test_FxtVMbyBR_PerCallReturnsAreAggregatedAcrossBatches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv('SCALE_NODES', "['synthetic-worker']")
     Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
@@ -924,6 +1008,7 @@ def test_FxtVMbyBR_VMcreateAllowsCLIOverrides(
 
     created = bundle.vmCreate(
         ns='selected-ns',
+        kCfg='/selected/kubeconfig',
         cliCfg=NamedDict(
             ocCfg={'context': 'selected-context'},
             vcCfg={'kubeconfig': '/selected-config'},
@@ -937,10 +1022,11 @@ def test_FxtVMbyBR_VMcreateAllowsCLIOverrides(
     selectedOC.assert_called_once_with(
         ns='selected-ns',
         context='selected-context',
+        kubeconfig='/selected/kubeconfig',
     )
     selectedVirtCtl.assert_called_once_with(
         ns='selected-ns',
-        kubeconfig='/selected-config',
+        kubeconfig='/selected/kubeconfig',
     )
     defaultOC.assert_not_called()
     defaultVirtCtl.assert_not_called()
@@ -984,6 +1070,7 @@ def test_FxtVMbyBR_VMcreateRejectsInternalKeywordReplacementBeforeOperations(
 def test_FxtVMbyBR_PreyieldPartialFailureCleansCreatedVMs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv('SCALE_NODES', "['synthetic-worker']")
     Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')
@@ -1026,6 +1113,7 @@ def test_FxtVMbyBR_PreyieldPartialFailureCleansCreatedVMs(
 def test_FxtVMbyBR_LaterPartialFailureCleansAggregateOnClose(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv('SCALE_NODES', "['synthetic-worker']")
     Utils.AutoPatch(monkeypatch, OCcli, 'GetResUID')
     Utils.AutoPatch(monkeypatch, MUT, 'VM')
     Utils.AutoPatch(monkeypatch, MUT, 'uuid4')

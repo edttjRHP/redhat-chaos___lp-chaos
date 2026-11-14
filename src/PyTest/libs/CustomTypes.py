@@ -3,6 +3,7 @@ from abc import ABCMeta
 from collections import defaultdict
 from enum import Enum, auto
 import os
+from reprlib import recursive_repr
 from typing import Any, Union, Optional, Type
 
 
@@ -11,6 +12,7 @@ class NamedDict(dict):
     A `dict` with dot access.
 
     The attribute/item assignment is blocked. Use `___update___()` instead.
+    The standard `update()` and `setdefault()` also validate identifier keys.
 
     Deep merge (`|`):
         For a key present in both `base` and `override`:
@@ -222,6 +224,27 @@ class NamedDict(dict):
         self.____check_keys____(data)
         super().update(data)
 
+    def update(self, /, *args: Any, **kwArgs: Any) -> None:
+        '''
+        Shallow-update entries after validating all incoming keys.
+
+        :param args:        Positional inputs accepted by `dict.update`.
+        :param kwArgs:      Keyword entries, applied after positional input.
+        '''
+        self.___update___(dict(*args, **kwArgs))
+
+    def setdefault(self, key: Any, default: Any = None, /) -> Any:
+        '''
+        Return an existing value or insert the supplied default.
+
+        :param key:         Valid Python identifier key.
+        :param default:     Value to insert if missing (default: `None`).
+
+        :return:            Existing value or the inserted default, as-is.
+        '''
+        self.____check_keys____({key: default})
+        return super().setdefault(key, default)
+
     # Shallow Merge (+).
     def __add__(self, other: Any) -> 'NamedDict':
         '''
@@ -333,6 +356,7 @@ class NestedDefDict(defaultdict):
         if (args and (args[0] is NestedDefDict)): args = args[1:]
         super().__init__(NestedDefDict, *args, **kwArgs)
 
+    @recursive_repr()
     def __repr__(self) -> str:
         '''
         Represent entries as an ordinary dictionary.

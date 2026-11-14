@@ -13,6 +13,7 @@ from libs.Utils.CmdExec import CmdExec, CmdRes
 class RHOVconnectionContext(NamedTuple):
     connection: RHOVsshCon
     virtCtl: mock.MagicMock
+    oc: mock.MagicMock
     cmdExec: mock.MagicMock
 
 class VMcontext(NamedTuple):

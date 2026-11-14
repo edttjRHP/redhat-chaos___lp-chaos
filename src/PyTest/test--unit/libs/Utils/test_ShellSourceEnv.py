@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import signal
 import subprocess
 import sys
 from unittest import mock
@@ -13,6 +14,64 @@ import pytest
 import libs.Utils.ShellSourceEnv as MUT
 from libs.CustomTypes import TempEnv
 import Utils
+
+
+def test_Snapshot_FailedInterpreterIsBounded_ReviewRegression() -> None:
+    def TimedOut(signum, frame):
+        raise TimeoutError('Snapshot did not notice interpreter failure')
+
+    previous = signal.signal(signal.SIGALRM, TimedOut)
+    shEnv = MUT.BashEnv('/unit/nonexistent-python')
+    try:
+        signal.alarm(3)
+        with pytest.raises(RuntimeError, match='Bash exited'):
+            shEnv.Snapshot()
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+        shEnv.Close()
+        shEnv.proc.stdin.close()
+        shEnv.proc.stdout.close()
+
+
+@pytest.mark.parametrize('method', ['write', 'flush'])
+def test_Snapshot_BrokenPipeIsRuntimeError_ReviewRegression(
+    bashEnv: MUT.BashEnv,
+    method: str,
+) -> None:
+    error = BrokenPipeError('closed')
+    getattr(bashEnv.proc.stdin, method).side_effect = error
+    with pytest.raises(RuntimeError) as caught: bashEnv.Snapshot()
+    assert (caught.value.__cause__ is error)
+    bashEnv.proc.stdout.readline.assert_not_called()
+
+
+@pytest.mark.parametrize('usePath', [False, True])
+def test_Source_LocalBasenameWinsInShellCwd_ReviewRegression(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    usePath: bool,
+) -> None:
+    local = tmp_path / 'local'
+    competitor = tmp_path / 'path'
+    local.mkdir()
+    competitor.mkdir()
+    (local / 'env.sh').write_text('export UNIT_STREAM_VALUE=local\n')
+    (competitor / 'env.sh').write_text('export UNIT_STREAM_VALUE=path\n')
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(
+        'PATH', str(competitor) + os.pathsep + os.environ['PATH'],
+    )
+    shEnv = MUT.BashEnv()
+    try:
+        shEnv.Source(StringIO('cd local'))
+        shEnv.Source(Path('env.sh') if usePath else 'env.sh')
+        assert (shEnv.Snapshot()['UNIT_STREAM_VALUE'] == 'local')
+        assert (Path.cwd() == tmp_path)
+    finally:
+        shEnv.Close()
+        shEnv.proc.stdin.close()
+        shEnv.proc.stdout.close()
 
 
 @pytest.mark.parametrize('pyBin', [None, sys.executable])
@@ -88,8 +147,10 @@ def test_Source_QuotesPathsAndProtectsCommandChannel(
 
     bashEnv.Source((path if usePath else str(path)))
 
+    expectedPath = shlex.quote('./' + str(path))
     bashEnv.proc.stdin.write.assert_called_once_with(
-        f'source {shlex.quote(str(path))} 0< /dev/null 1>&2 || exit $?\n'
+        f'source {expectedPath} 0< /dev/null 1>&2\n'
+        'case $? in (0) ;; (*) exit $?;; esac\n'
     )
     bashEnv.proc.stdin.flush.assert_called_once_with()
 
@@ -104,7 +165,10 @@ def test_Source_CopiesStreamContentWithoutQuotingOrClosing(
 
     assert (bashEnv.proc.stdin.write.call_args_list == [
         mock.call('{\n: # Protect from empty file.\n'), mock.call(content),
-        mock.call('\n} 0< /dev/null 1>&2 || exit $?\n'),
+        mock.call(
+            '\n} 0< /dev/null 1>&2\n'
+            'case $? in (0) ;; (*) exit $?;; esac\n'
+        ),
     ])
     bashEnv.proc.stdin.flush.assert_called_once_with()
     assert not stream.closed
@@ -232,6 +296,32 @@ def test_Source_FinalFailureIsDetectedBySnapshot(
     assert (nativeBashEnv.proc.wait(timeout=5) == 1)
 
 
+@pytest.mark.parametrize('usePath', [False, True])
+@pytest.mark.parametrize('failureScript', [
+    'set -e\n(exit 7)\nexport UNIT_STREAM_VALUE=unreachable',
+    '(exit 7)',
+])
+def test_GetEnvDelta_SourceFailuresPreventPartialEnvironment(
+    nativeBashEnv: MUT.BashEnv,
+    tmp_path: Path,
+    usePath: bool,
+    failureScript: str,
+) -> None:
+    beforeEnv = dict(os.environ)
+    script = 'export UNIT_STREAM_VALUE=partial\n' + failureScript
+    if usePath:
+        envFile = tmp_path / 'source failure.sh'
+        envFile.write_text(script)
+    else:
+        envFile = StringIO(script)
+
+    with pytest.raises(RuntimeError, match='Bash exited'):
+        MUT.GetEnvDelta(lambda: nativeBashEnv, [envFile])
+
+    assert (nativeBashEnv.proc.wait(timeout=5) == 7)
+    assert (dict(os.environ) == beforeEnv)
+
+
 def test_Source_TransfersLargeStreamWithOnlyBoundedReads(
     nativeBashEnv: MUT.BashEnv,
 ) -> None:
@@ -312,7 +402,8 @@ def test_Snapshot_UsesQuotedInterpreterAndDecodesOneLine(
     assert (bashEnv.Snapshot() == expected)
 
     command = bashEnv.proc.stdin.write.call_args.args[0]
-    (pyBin, option, pyCode) = shlex.split(command)
+    (pyBin, option, pyCode, *onFailure) = shlex.split(command)
+    assert (onFailure == ['||', 'exit', '$?'])
     assert (pyBin == '/python with spaces')
     assert (option == '-c')
     assert ('json.dump(dict(os.environ), sys.stdout)' in pyCode)

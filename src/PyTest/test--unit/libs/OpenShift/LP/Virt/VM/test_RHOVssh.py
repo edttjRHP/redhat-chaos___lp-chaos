@@ -35,7 +35,7 @@ def test_IsAlive_Close_SuppressOnlyNativeNonzeroWarnings(
     connection = rhovConnection.connection
     executor = MUT.CmdExec()
     executor.Run = mock.Mock(wraps=executor.Run)
-    connection.cmdExec = executor
+    connection.cli.___update___(cmdExec=executor)
     result = getattr(connection, method)()
     command = [
         'ssh', '-O', operation, '-o',
@@ -58,8 +58,10 @@ def test_Connect_OnlyControlChecksOptOutOfNativeWarnings(
     subprocess.run.return_value = subprocess.CompletedProcess([], 0, '', '')
     connection = rhovConnection.connection
     executor = MUT.CmdExec()
-    connection.cmdExec = executor
-    connection.virtCtl = MUT.VirtCtlCLI('synthetic-virtctl', cmdExec=executor)
+    connection.cli.___update___(cmdExec=executor)
+    connection.cli.___update___(
+        virtCtl=MUT.VirtCtlCLI('synthetic-virtctl', cmdExec=executor),
+    )
     subprocess.run.reset_mock()
     executor.Run = mock.Mock(wraps=executor.Run)
     subprocess.run.side_effect = [
@@ -109,7 +111,7 @@ def test_RunShell_RetainsNativeFailureWarning(
     connection = rhovConnection.connection
     executor = MUT.CmdExec()
     executor.Run = mock.Mock(wraps=executor.Run)
-    connection.cmdExec = executor
+    connection.cli.___update___(cmdExec=executor)
     result = connection.RunShell('synthetic-command', stdin='synthetic-input')
 
     assert (result == CmdRes('synthetic-out', 'synthetic-error', 9, False))
@@ -131,13 +133,14 @@ def test_Init_IsolatesControlSocketsByNamespace(
     first = rhovConnection.connection
     second = MUT.RHOVsshCon(
         'other-ns', first.host, first.user, first.idFile,
-        virtCtl=rhovConnection.virtCtl, cmdExec=rhovConnection.cmdExec,
+        virtCtl=rhovConnection.virtCtl, oc=rhovConnection.oc,
+        cmdExec=rhovConnection.cmdExec,
     )
 
-    assert (second.ctrlPath == (
-        f'/tmp/ssh..{hashlib.sha256(b"user@vm-one.other-ns").hexdigest()}'
-        '..sock'
-    ))
+    expectedHash = hashlib.sha256(
+        b'user@vm-one.other-ns.cluster-one'
+    ).hexdigest()
+    assert (second.ctrlPath == f'/tmp/ssh..{expectedHash}..sock')
     assert (first.ctrlPath != second.ctrlPath)
 
 
@@ -150,19 +153,25 @@ def test_Init_UsesSuppliedCollaboratorsAndExpandsIdentityPath(
     assert (connection.host == 'vm-one')
     assert (connection.user == 'user')
     assert (connection.idFile == str(Path('~/key').expanduser()))
-    assert (connection.target == 'user@vm-one.namespace')
-    assert (connection.ctrlPath == (
-        f'/tmp/ssh..{hashlib.sha256(b"user@vm-one.namespace").hexdigest()}'
-        '..sock'
-    ))
+    assert (connection.target == 'user@vm-one.namespace.cluster-one')
+    expectedHash = hashlib.sha256(
+        b'user@vm-one.namespace.cluster-one'
+    ).hexdigest()
+    assert (connection.ctrlPath == f'/tmp/ssh..{expectedHash}..sock')
     assert (len(connection.ctrlPath.encode('utf-8')) == 80)
-    assert (connection.virtCtl is rhovConnection.virtCtl)
-    assert (connection.cmdExec is rhovConnection.cmdExec)
+    assert (connection.cli.virtCtl is rhovConnection.virtCtl)
+    assert (connection.cli.cmdExec is rhovConnection.cmdExec)
+    assert (connection.cli.oc is rhovConnection.oc)
+    rhovConnection.oc.GetResUID.assert_called_once_with(
+        'namespace/kube-system',
+    )
 
 
 def test_Init_CreatesDefaultsWithExplicitKubeconfig(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    Utils.AutoPatch(monkeypatch, MUT, 'OCcli')
+    MUT.OCcli.return_value.GetResUID.return_value = (True, 'cluster-one', '')
     Utils.AutoPatch(monkeypatch, MUT, 'VirtCtlCLI')
     Utils.AutoPatch(monkeypatch, MUT, 'CmdExec')
 
@@ -174,10 +183,93 @@ def test_Init_CreatesDefaultsWithExplicitKubeconfig(
         kubeconfig='/kube',
     )
 
+    MUT.OCcli.assert_called_once_with(n='ns', kubeconfig='/kube')
     MUT.VirtCtlCLI.assert_called_once_with(n='ns', kubeconfig='/kube')
     MUT.CmdExec.assert_called_once_with()
-    assert (connection.virtCtl is MUT.VirtCtlCLI.return_value)
-    assert (connection.cmdExec is MUT.CmdExec.return_value)
+    assert (connection.cli.virtCtl is MUT.VirtCtlCLI.return_value)
+    assert (connection.cli.oc is MUT.OCcli.return_value)
+    assert (connection.cli.cmdExec is MUT.CmdExec.return_value)
+
+
+def test_Init_IsolatesClustersAndReusesTheSameClusterIdentity(
+    rhovConnection: Utils.RHOVconnectionContext,
+) -> None:
+    first = rhovConnection.connection
+    otherOC = mock.create_autospec(MUT.OCcli, instance=True)
+    otherOC.GetResUID.return_value = (True, 'cluster-two', '')
+    otherVirtCtl = mock.create_autospec(MUT.VirtCtlCLI, instance=True)
+    other = MUT.RHOVsshCon(
+        first.ns, first.host, first.user, first.idFile,
+        virtCtl=otherVirtCtl, oc=otherOC, cmdExec=rhovConnection.cmdExec,
+    )
+    sameOC = mock.create_autospec(MUT.OCcli, instance=True)
+    sameOC.GetResUID.return_value = (True, 'cluster-one', '')
+    sameVirtCtl = mock.create_autospec(MUT.VirtCtlCLI, instance=True)
+    repeated = MUT.RHOVsshCon(
+        first.ns, first.host, first.user, first.idFile,
+        virtCtl=sameVirtCtl, oc=sameOC, cmdExec=rhovConnection.cmdExec,
+    )
+
+    assert (other.target == 'user@vm-one.namespace.cluster-two')
+    assert (other.ctrlPath != first.ctrlPath)
+    assert (repeated.ctrlPath == first.ctrlPath)
+    assert (len(other.ctrlPath.encode('utf-8')) == 80)
+    otherOC.GetResUID.assert_called_once_with('namespace/kube-system')
+    sameOC.GetResUID.assert_called_once_with('namespace/kube-system')
+    otherVirtCtl.Run.assert_not_called()
+    sameVirtCtl.Run.assert_not_called()
+    rhovConnection.virtCtl.Run.assert_not_called()
+    rhovConnection.cmdExec.Run.assert_not_called()
+
+
+@pytest.mark.parametrize('lookup', [
+    (False, '', 'forbidden'), (False, 'partial-uid', 'failed'),
+    (True, '', ''),
+])
+def test_Init_RejectsFailedOrEmptyClusterUID(
+    rhovConnection: Utils.RHOVconnectionContext,
+    lookup: tuple[bool, str, str],
+) -> None:
+    oc = mock.create_autospec(MUT.OCcli, instance=True)
+    oc.GetResUID.return_value = lookup
+    with pytest.raises(RuntimeError, match='namespace/kube-system'):
+        MUT.RHOVsshCon(
+            'ns', 'vm', 'user', 'key', virtCtl=rhovConnection.virtCtl,
+            oc=oc, cmdExec=rhovConnection.cmdExec,
+        )
+    oc.GetResUID.assert_called_once_with('namespace/kube-system')
+    rhovConnection.virtCtl.Run.assert_not_called()
+    rhovConnection.cmdExec.Run.assert_not_called()
+
+
+@pytest.mark.parametrize('falsey', [False, True])
+def test_Init_PreservesProvidedClientsInsteadOfCreatingDefaults(
+    monkeypatch: pytest.MonkeyPatch,
+    falsey: bool,
+) -> None:
+    oc = mock.MagicMock()
+    virtCtl = mock.MagicMock()
+    executor = mock.MagicMock()
+    for client in (oc, virtCtl, executor):
+        client.__bool__.return_value = not falsey
+    oc.GetResUID.return_value = (True, 'provided-cluster', '')
+    Utils.AutoPatch(monkeypatch, MUT, 'OCcli')
+    Utils.AutoPatch(monkeypatch, MUT, 'VirtCtlCLI')
+    Utils.AutoPatch(monkeypatch, MUT, 'CmdExec')
+
+    connection = MUT.RHOVsshCon(
+        'ns', 'vm', 'user', 'key', kubeconfig='/ignored', virtCtl=virtCtl,
+        oc=oc, cmdExec=executor,
+    )
+
+    assert (connection.cli.oc is oc)
+    assert (connection.cli.virtCtl is virtCtl)
+    assert (connection.cli.cmdExec is executor)
+    assert (connection.target == 'user@vm.ns.provided-cluster')
+    oc.GetResUID.assert_called_once_with('namespace/kube-system')
+    MUT.OCcli.assert_not_called()
+    MUT.VirtCtlCLI.assert_not_called()
+    MUT.CmdExec.assert_not_called()
 
 
 @pytest.mark.parametrize('ns,host,user', [
@@ -194,14 +286,16 @@ def test_Init_ControlSocketIdentityIsStableAndDistinct(
     first = rhovConnection.connection
     changed = MUT.RHOVsshCon(
         ns, host, user, first.idFile,
-        virtCtl=rhovConnection.virtCtl, cmdExec=rhovConnection.cmdExec,
+        virtCtl=rhovConnection.virtCtl, oc=rhovConnection.oc,
+        cmdExec=rhovConnection.cmdExec,
     )
     repeated = MUT.RHOVsshCon(
         ns, host, user, first.idFile,
-        virtCtl=rhovConnection.virtCtl, cmdExec=rhovConnection.cmdExec,
+        virtCtl=rhovConnection.virtCtl, oc=rhovConnection.oc,
+        cmdExec=rhovConnection.cmdExec,
     )
 
-    assert (changed.target == f'{user}@{host}.{ns}')
+    assert (changed.target == f'{user}@{host}.{ns}.cluster-one')
     assert (len(changed.ctrlPath.encode('utf-8')) == 80)
     assert (changed.ctrlPath == repeated.ctrlPath)
     assert (changed.ctrlPath != first.ctrlPath)
@@ -217,7 +311,8 @@ def test_Init_LongNamesAllowLocalSocketWithTemporarySuffix(
 ) -> None:
     connection = MUT.RHOVsshCon(
         ns, host, 'qa-usr', '/synthetic/not-read',
-        virtCtl=rhovConnection.virtCtl, cmdExec=rhovConnection.cmdExec,
+        virtCtl=rhovConnection.virtCtl, oc=rhovConnection.oc,
+        cmdExec=rhovConnection.cmdExec,
     )
     socketPath = connection.ctrlPath + '.' + uuid.uuid4().hex[:16]
 
@@ -237,21 +332,27 @@ def test_Init_ReadsKubeconfigEnvironment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv('KUBECONFIG', '/from-env')
+    Utils.AutoPatch(monkeypatch, MUT, 'OCcli')
+    MUT.OCcli.return_value.GetResUID.return_value = (True, 'cluster-one', '')
     Utils.AutoPatch(monkeypatch, MUT, 'VirtCtlCLI')
     Utils.AutoPatch(monkeypatch, MUT, 'CmdExec')
 
     MUT.RHOVsshCon('ns', 'vm', 'user', 'key')
 
+    MUT.OCcli.assert_called_once_with(n='ns', kubeconfig='/from-env')
     MUT.VirtCtlCLI.assert_called_once_with(n='ns', kubeconfig='/from-env')
 
 
 def test_Init_OmitsAbsentKubeconfig(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv('KUBECONFIG', raising=False)
+    Utils.AutoPatch(monkeypatch, MUT, 'OCcli')
+    MUT.OCcli.return_value.GetResUID.return_value = (True, 'cluster-one', '')
     Utils.AutoPatch(monkeypatch, MUT, 'VirtCtlCLI')
     Utils.AutoPatch(monkeypatch, MUT, 'CmdExec')
 
     MUT.RHOVsshCon('ns', 'vm', 'user', 'key')
 
+    MUT.OCcli.assert_called_once_with(n='ns')
     MUT.VirtCtlCLI.assert_called_once_with(n='ns')
 
 
@@ -459,7 +560,8 @@ def test_Probe_CapsSleepToRemainingTimeout(
     MUT.RHOVsshCon.Close.assert_not_called()
     assert (probeClock.now == 10.5)
     assert (
-        'SSH probe timeout on user@vm-one.namespace after 0.5s' in caplog.text
+        'SSH probe timeout on user@vm-one.namespace.cluster-one '
+        'after 0.5s' in caplog.text
     )
 
 
@@ -630,7 +732,7 @@ def test_RunPowerShell_PreservesNativeStdinAndDisablesTTY(
         ['synthetic'], exitCode, 'stdout\n', 'stderr\n',
     )
     connection = rhovConnection.connection
-    connection.cmdExec = MUT.CmdExec()
+    connection.cli.___update___(cmdExec=MUT.CmdExec())
     script = 'Write-Output "caf\u00e9"\r\n'
     options = {} if (interactive is None) else {'interactive': interactive}
 

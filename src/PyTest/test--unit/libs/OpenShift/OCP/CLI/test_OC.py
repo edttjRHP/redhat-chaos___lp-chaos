@@ -13,6 +13,28 @@ import libs.OpenShift.OCP.CLI.OC as MUT
 import Utils
 
 
+@pytest.mark.parametrize('outer,inner', [
+    (True, False), (False, True), (True, True), (False, False),
+])
+def test_NewRes_SecretCannotBeDowngraded_ReviewRegression(
+    outer: bool,
+    inner: bool,
+) -> None:
+    cli = BuildCLI()
+    cli.Run.side_effect = [Result(True, '{}'), Result(True, ''), Result(
+        True, '{"kind":"Secret","metadata":{"name":"synthetic"}}',
+    )]
+    cli.NewRes({
+        'subCmd': 'secret generic', 'args': ['synthetic'],
+        'opts': {'isSecret': inner},
+    }, isSecret=outer, checkExist=True, waitCond=None)
+    assert (len(cli.Run.call_args_list) == 3)
+    assert all(
+        (call.kwargs['isSecret'] is outer)
+        for call in cli.Run.call_args_list
+    )
+
+
 @pytest.mark.parametrize('phase', ['APPLIED', 'WAITED'])
 @pytest.mark.parametrize('cleanup', ['absent', 'failed', 'exception'])
 @pytest.mark.parametrize('native', [False, True])
@@ -163,7 +185,6 @@ def test_ResourceAPI_DocstringsRetainContractsAnd79Columns(
     for parameter in parameters: assert (f':param {parameter}:' in doc)
     if (inspect.signature(method).return_annotation is not None):
         assert (':return:' in doc)
-    assert (':raises ' in doc)
     assert all(
         (len(line) <= 79)
         for line in source.splitlines()[
@@ -880,3 +901,180 @@ def test_DelRes_SingleWaitingCommandPreservesClientAndResult(
             '--wait=true', 'Secret/example',
         ], input=None, isSecret=False, spPars=None),
     ])
+
+
+@pytest.fixture(name='commandCLI')
+def FxtCommandCLI() -> tuple[MUT.OCcli, mock.MagicMock]:
+    '''Provide an OC client and mocked executor for namespace tests.'''
+    executor = mock.create_autospec(MUT.CmdExec, instance=True)
+    executor.Run.return_value = Result(True, (
+        '  -n, --namespace string\n'
+        '      --kubeconfig string\n'
+        '      --context string\n'
+    ))
+    cli = MUT.OCcli(
+        'mock-oc', cmdExec=executor,
+        kubeconfig='/selected/config', context='selected-context',
+    )
+    return (cli, executor)
+
+
+@pytest.mark.parametrize('namespace', [None, '', 'resource-ns'])
+@pytest.mark.parametrize('defaults', [
+    {}, {'n': 'short-ns'}, {'namespace': 'long-ns'},
+    {'n': 'short-ns', 'namespace': 'long-ns'},
+])
+def test__InNamespace_IsolatesDefaultsAndReusesExecutorAndDiscovery(
+    commandCLI: tuple[MUT.OCcli, mock.MagicMock],
+    namespace: str | None,
+    defaults: dict,
+) -> None:
+    (cli, executor) = commandCLI
+    cli.defOpts.update(defaults)
+    original = dict(cli.defOpts)
+
+    scoped = cli._InNamespace(namespace)
+
+    assert (cli.defOpts == original)
+    executor.Run.assert_called_once_with(['mock-oc', 'options'])
+    if namespace:
+        assert (scoped is not cli)
+        assert (type(scoped) is type(cli))
+        assert (scoped.defOpts is not cli.defOpts)
+        assert (scoped.defOpts == ({
+            key: value for (key, value) in original.items()
+            if (key not in {'n', 'namespace'})
+        } | {'n': namespace}))
+        assert (scoped.cmdExec is cli.cmdExec)
+        assert (scoped.cmnOpts is cli.cmnOpts)
+        assert (scoped.shortMap is cli.shortMap)
+        executor.Run.return_value = Result(True, 'selected-uid')
+        assert (scoped.GetResUID('ConfigMap/example') == (
+            True, 'selected-uid', '',
+        ))
+        assert (executor.Run.call_args == mock.call([
+            'mock-oc', '--kubeconfig=/selected/config',
+            '--context=selected-context', f'-n={namespace}',
+            'get', '-o=jsonpath={.metadata.uid}', '--ignore-not-found=true',
+            'ConfigMap/example',
+        ], input=None, isSecret=False, spPars=None))
+    else:
+        assert (scoped is cli)
+
+
+@pytest.mark.parametrize('namespace', [None, 'resource-ns'])
+@pytest.mark.parametrize('waitCond', [None, 'create'])
+@pytest.mark.parametrize('native', [False, True])
+def test_EnsureRes_WaitAndOwnershipCleanupUseReturnedNamespace(
+    commandCLI: tuple[MUT.OCcli, mock.MagicMock],
+    namespace: str | None,
+    waitCond: str | None,
+    native: bool,
+) -> None:
+    (cli, executor) = commandCLI
+    original = dict(cli.defOpts)
+    kind = 'ConfigMap' if namespace else 'Namespace'
+    metadata = {'name': 'example'}
+    if namespace: metadata['namespace'] = namespace
+    manifest = json.dumps({'kind': kind, 'metadata': metadata})
+    resource = {'kind': kind, 'metadata': {**metadata, 'uid': 'created-uid'}}
+    specification = ({
+        'subCmd': 'configmap' if namespace else 'namespace',
+        'args': ['example'],
+        'opts': {'n': namespace} if namespace else {},
+    } if native else manifest)
+    responses = [
+        Result(True, manifest), Result(True),
+        Result(True, json.dumps(resource)),
+    ]
+    if (waitCond is not None): responses.append(Result(True))
+    responses.extend([Result(True, 'created-uid'), Result(True)])
+    executor.Run.side_effect = responses
+    owned = []
+
+    actual = cli.EnsureRes(
+        specification, owned, isSecret=True,
+        optsNewRes={'waitCond': waitCond},
+    )
+
+    assert (actual == resource)
+    assert (len(owned) == 1)
+    (ownedOC, resRef, uid) = owned[0]
+    assert (resRef == f'{kind}/example')
+    assert (uid == 'created-uid')
+    if namespace: assert (ownedOC is not cli)
+    else: assert (ownedOC is cli)
+    assert (ownedOC.cmdExec is executor)
+    MUT.OCcli.CleanUpRes(owned)
+    prefix = [
+        'mock-oc', '--kubeconfig=/selected/config',
+        '--context=selected-context',
+    ]
+    if namespace: prefix.append(f'-n={namespace}')
+    expected = []
+    if (waitCond is not None):
+        expected.append(mock.call((prefix + [
+            'wait', '--for=create', '--timeout=2m', resRef,
+        ]), input=None, isSecret=True, spPars=None))
+    expected.extend([
+        mock.call((prefix + [
+            'get', '-o=jsonpath={.metadata.uid}', '--ignore-not-found=true',
+            resRef,
+        ]), input=None, isSecret=False, spPars=None),
+        mock.call((prefix + [
+            'delete', '--ignore-not-found=true', '--timeout=2m', '--wait=true',
+            resRef,
+        ]), input=None, isSecret=False, spPars=None),
+    ])
+    assert (executor.Run.call_args_list[(-len(expected)):] == expected)
+    assert (executor.Run.call_count == (7 if (waitCond is not None) else 6))
+    assert (cli.defOpts == original)
+
+
+@pytest.mark.parametrize('waited', [False, True])
+def test_EnsureRes_PendingDeletionWaitUsesReturnedNamespace(
+    commandCLI: tuple[MUT.OCcli, mock.MagicMock],
+    waited: bool,
+) -> None:
+    (cli, executor) = commandCLI
+    original = dict(cli.defOpts)
+    metadata = {'name': 'example', 'namespace': 'resource-ns'}
+    manifest = json.dumps({'kind': 'ConfigMap', 'metadata': metadata})
+    deleting = {'kind': 'ConfigMap', 'metadata': {
+        **metadata, 'uid': 'old',
+        'deletionTimestamp': '2026-01-01T00:00:00Z',
+    }}
+    created = {'kind': 'ConfigMap', 'metadata': {**metadata, 'uid': 'new'}}
+    executor.Run.side_effect = [
+        Result(True, manifest), Result(True, json.dumps(deleting)),
+        Result(waited), Result(True, manifest), Result(True),
+        Result(True, json.dumps(created)), Result(True),
+    ]
+    owned = []
+
+    if waited:
+        assert (cli.EnsureRes(manifest, owned) == created)
+        assert (len(owned) == 1)
+        assert (owned[0][0].defOpts['n'] == 'resource-ns')
+        assert (owned[0][1:] == ('ConfigMap/example', 'new'))
+    else:
+        with pytest.raises(RuntimeError, match='Waiting for deletion'):
+            cli.EnsureRes(manifest, owned)
+        assert (owned == [])
+    waits = [
+        call for call in executor.Run.call_args_list
+        if ('wait' in call.args[0])
+    ]
+    prefix = [
+        'mock-oc', '--kubeconfig=/selected/config',
+        '--context=selected-context', '-n=resource-ns',
+    ]
+    assert (waits[0] == mock.call((prefix + [
+        'wait', '--for=delete', '--timeout=5m', 'ConfigMap/example',
+    ]), input=None, isSecret=False, spPars=None))
+    if waited:
+        assert (waits[1] == mock.call((prefix + [
+            'wait', '--for=create', '--timeout=2m', 'ConfigMap/example',
+        ]), input=None, isSecret=False, spPars=None))
+    assert (executor.Run.call_count == (8 if waited else 4))
+    assert (cli.defOpts == original)

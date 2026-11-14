@@ -26,6 +26,8 @@ def ProbeClock(monkeypatch: pytest.MonkeyPatch) -> Utils.FakeClock:
 
 @pytest.fixture(name='rhovConnection')
 def RHOVconnection() -> Iterator[Utils.RHOVconnectionContext]:
+    oc = mock.create_autospec(OCcli, instance=True)
+    oc.GetResUID.return_value = (True, 'cluster-one', '')
     virtCtl = mock.create_autospec(VirtCtlCLI, instance=True)
     cmdExec = mock.create_autospec(CmdExec, instance=True)
     yield Utils.RHOVconnectionContext(
@@ -36,9 +38,11 @@ def RHOVconnection() -> Iterator[Utils.RHOVconnectionContext]:
             idFile='~/key',
             ctrlPersist='2h',
             virtCtl=virtCtl,
+            oc=oc,
             cmdExec=cmdExec,
         ),
         virtCtl=virtCtl,
+        oc=oc,
         cmdExec=cmdExec,
     )
 
@@ -46,6 +50,7 @@ def RHOVconnection() -> Iterator[Utils.RHOVconnectionContext]:
 @pytest.fixture(name='virtualMachine')
 def VirtualMachine() -> Iterator[Utils.VMcontext]:
     oc = mock.create_autospec(OCcli, instance=True)
+    oc.GetResUID.return_value = (True, 'cluster-one', '')
     virtCtl = mock.create_autospec(VirtCtlCLI, instance=True)
     yield Utils.VMcontext(
         vm=VM('vm-one', 'namespace', oc=oc, virtCtl=virtCtl),

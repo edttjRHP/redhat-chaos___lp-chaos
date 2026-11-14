@@ -11,6 +11,34 @@ import libs.Utils.CmdExec as MUT
 import Utils
 
 
+@pytest.mark.parametrize('output', ['text', b'bytes', None])
+def test_Run_UncapturedStderrRetries_ReviewRegression(
+    monkeypatch: pytest.MonkeyPatch,
+    output: str | bytes | None,
+) -> None:
+    results = [
+        subprocess.CompletedProcess(['synthetic'], code, output, None)
+        for code in (7, 0)
+    ]
+    run = mock.Mock(side_effect=results)
+    monkeypatch.setattr(MUT.subprocess, 'run', run)
+    monkeypatch.setattr(MUT.time, 'sleep', mock.Mock())
+    spPars = {
+        'capture_output': False, 'text': not isinstance(output, bytes),
+    }
+    if (output is not None): spPars['stdout'] = subprocess.PIPE
+    result = MUT.CmdExec().Run(
+        ['synthetic'], tryMax=2, spPars=spPars,
+    )
+    assert result.success
+    assert (result.stdout is output)
+    assert (result.stderr is None)
+    assert (run.call_count == 2)
+    assert (run.call_args_list == [
+        mock.call(['synthetic'], input=None, shell=False, **spPars),
+    ] * 2)
+
+
 @pytest.mark.parametrize('warnOnFail', [None, True, False])
 @pytest.mark.parametrize('isSecret', [False, True])
 @pytest.mark.parametrize('exitCodes', [(0,), (7,), (7, 0), (7, 9)])

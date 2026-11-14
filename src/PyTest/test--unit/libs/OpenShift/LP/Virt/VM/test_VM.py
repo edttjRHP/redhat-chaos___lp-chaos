@@ -3,11 +3,45 @@ from unittest import mock
 
 import pytest
 
+import libs.OpenShift.LP.Virt.VM.RHOVssh as sshModule
 from libs.OpenShift.LP.Virt.VM.RHOVssh import RHOVsshCon
 import libs.OpenShift.LP.Virt.VM.VM as MUT
 from libs.OpenShift.OCP.CLI.OC import OCcli
 from libs.Utils.CmdExec import CmdRes
 import Utils
+
+
+@pytest.mark.parametrize('teardown', ['close', 'resume', 'primary'])
+@pytest.mark.parametrize('sshFailure', [False, True])
+def test_CleanUpVMs_RealHelpersOnGeneratorExit_ReviewRegression(
+    teardown: str,
+    sshFailure: bool,
+) -> None:
+    cli = OCmock()
+    cli.GetResUID.return_value = (True, 'owned-uid', '')
+    cli.DelRes.return_value = (OCcli.ResPhase.DELETED, CommandResult(False))
+    vm = SimpleNamespace(name='owned', RmvSSH=mock.Mock(
+        side_effect=RuntimeError('SSH failed') if sshFailure else None,
+    ))
+
+    def Fixture():
+        try: yield
+        finally:
+            MUT.VM.CleanUpVMs(
+                [vm], [(cli, 'VirtualMachine/owned', 'owned-uid')],
+            )
+
+    generator = Fixture()
+    next(generator)
+    error = RuntimeError('primary')
+    with pytest.raises(RuntimeError) as caught:
+        if (teardown == 'close'): generator.close()
+        elif (teardown == 'resume'): next(generator)
+        else: generator.throw(error)
+    if (teardown == 'primary'): assert (caught.value is error)
+    else: assert ('VM cleanup failed' in str(caught.value))
+    vm.RmvSSH.assert_called_once_with()
+    cli.DelRes.assert_called_once_with('VirtualMachine/owned')
 
 
 def CommandResult(
@@ -103,15 +137,19 @@ def test_Init_CreatesDefaultClients(monkeypatch: pytest.MonkeyPatch) -> None:
     assert (vm.cli.virtCtl is MUT.VirtCtlCLI.return_value)
 
 
+@pytest.mark.parametrize('stdout', [
+    'Running', "'Running'", " \t'Running'\n", '',
+])
 def test__Status_ReturnsValueOnlyForSuccess(
     virtualMachine: Utils.VMcontext,
+    stdout: str,
 ) -> None:
-    virtualMachine.oc.Run.return_value = CommandResult(True, "'Running'")
-    assert (virtualMachine.vm._Status() == 'Running')
+    virtualMachine.oc.Run.return_value = CommandResult(True, stdout)
+    assert (virtualMachine.vm._Status() == stdout)
     virtualMachine.oc.Run.assert_called_once_with(
         'get',
         'VirtualMachine/vm-one',
-        o="jsonpath='{.status.printableStatus}'",
+        o='jsonpath={.status.printableStatus}',
     )
 
     virtualMachine.oc.Run.return_value = CommandResult(False, "'Stopped'")
@@ -142,7 +180,9 @@ def test_Start_SkipsNativeStartButWaitsForActiveVM(
     assert (result is waitSuccess)
     virtualMachine.virtCtl.Run.assert_not_called()
     virtualMachine.oc.Run.assert_called_once_with(
-        'wait', 'VirtualMachine/vm-one', **{'for': 'condition=Ready'},
+        'wait',
+        'VirtualMachine/vm-one',
+        **{'for': 'condition=Ready'},
         timeout='5m' if (timeout is None) else timeout,
     )
 
@@ -178,7 +218,9 @@ def test_Start_WaitsOnlyAfterNativeStartSucceeds(
     if (not startSuccess): virtualMachine.oc.Run.assert_not_called()
     else:
         virtualMachine.oc.Run.assert_called_once_with(
-            'wait', 'VirtualMachine/vm-one', **{'for': 'condition=Ready'},
+            'wait',
+            'VirtualMachine/vm-one',
+            **{'for': 'condition=Ready'},
             timeout='5m' if (timeout is None) else timeout,
         )
 
@@ -378,6 +420,7 @@ def test_NewSSH_UsesDefaultsAndProbes(
         user='qa-usr',
         idFile='~/.ssh/id_ed25519',
         virtCtl=virtualMachine.virtCtl,
+        oc=virtualMachine.oc,
     )
     connection.Probe.assert_called_once_with(timeout=12)
 
@@ -404,7 +447,80 @@ def test_NewSSH_AllowsOverrides(
         idFile='/override',
         ctrlPersist='1h',
         virtCtl=None,
+        oc=virtualMachine.oc,
     )
+
+
+@pytest.mark.parametrize(('overrideVirtCtl', 'overrideOC'), [
+    (False, False), (True, False), (False, True), (True, True),
+])
+def test_NewSSH_AppliesClientOverridesIndependently(
+    monkeypatch: pytest.MonkeyPatch,
+    virtualMachine: Utils.VMcontext,
+    overrideVirtCtl: bool,
+    overrideOC: bool,
+) -> None:
+    Utils.AutoPatch(monkeypatch, MUT, 'RHOVsshCon')
+    MUT.RHOVsshCon.return_value.Probe.return_value = True
+    overrides = {}
+    if overrideVirtCtl: overrides['virtCtl'] = None
+    if overrideOC: overrides['oc'] = None
+
+    virtualMachine.vm.NewSSH(**overrides)
+
+    kwargs = MUT.RHOVsshCon.call_args.kwargs
+    assert (kwargs['virtCtl'] is (
+        None if overrideVirtCtl else virtualMachine.virtCtl
+    ))
+    assert (kwargs['oc'] is (None if overrideOC else virtualMachine.oc))
+
+
+def test_NewSSH_PreservesExplicitOCAndVirtCtlPair(
+    monkeypatch: pytest.MonkeyPatch,
+    virtualMachine: Utils.VMcontext,
+) -> None:
+    Utils.AutoPatch(monkeypatch, MUT, 'RHOVsshCon')
+    MUT.RHOVsshCon.return_value.Probe.return_value = True
+    otherOC = mock.create_autospec(OCcli, instance=True)
+    otherVirtCtl = mock.MagicMock()
+
+    virtualMachine.vm.NewSSH(virtCtl=otherVirtCtl, oc=otherOC)
+
+    kwargs = MUT.RHOVsshCon.call_args.kwargs
+    assert (kwargs['oc'] is otherOC)
+    assert (kwargs['virtCtl'] is otherVirtCtl)
+    assert (virtualMachine.vm.cli.oc is virtualMachine.oc)
+    assert (virtualMachine.vm.cli.virtCtl is virtualMachine.virtCtl)
+
+
+def test_NewSSH_RecreatesBothClientsForExplicitKubeconfig(
+    monkeypatch: pytest.MonkeyPatch,
+    virtualMachine: Utils.VMcontext,
+) -> None:
+    Utils.AutoPatch(monkeypatch, RHOVsshCon, 'Probe')
+    RHOVsshCon.Probe.return_value = True
+    Utils.AutoPatch(monkeypatch, sshModule, 'OCcli')
+    Utils.AutoPatch(monkeypatch, sshModule, 'VirtCtlCLI')
+    sshModule.OCcli.return_value.GetResUID.return_value = (
+        True, 'selected-cluster', '',
+    )
+    executor = mock.MagicMock()
+
+    connection = virtualMachine.vm.NewSSH(
+        kubeconfig='/selected-config', virtCtl=None, oc=None, cmdExec=executor,
+    )
+
+    sshModule.OCcli.assert_called_once_with(
+        n='namespace', kubeconfig='/selected-config',
+    )
+    sshModule.VirtCtlCLI.assert_called_once_with(
+        n='namespace', kubeconfig='/selected-config',
+    )
+    assert (connection.cli.oc is sshModule.OCcli.return_value)
+    assert (connection.cli.virtCtl is sshModule.VirtCtlCLI.return_value)
+    assert (connection.cli.cmdExec is executor)
+    assert (connection.target == 'qa-usr@vm-one.namespace.selected-cluster')
+    virtualMachine.oc.GetResUID.assert_not_called()
 
 
 def test_NewSSH_TimeoutRaisesAndDoesNotCache(
@@ -431,7 +547,7 @@ def test_ssh_UsesSelectedClientAndCachesConnection(
 
     connection = virtualMachine.vm.ssh
 
-    assert (connection.virtCtl is virtualMachine.virtCtl)
+    assert (connection.cli.virtCtl is virtualMachine.virtCtl)
     assert (connection.ns == virtualMachine.vm.namespace)
     assert (virtualMachine.vm.ssh is connection)
     RHOVsshCon.Probe.assert_called_once_with(connection, timeout=300)
@@ -447,7 +563,13 @@ def test_NewSSH_PreservesExplicitClientOverride(
 
     connection = virtualMachine.vm.NewSSH(virtCtl=otherClient)
 
-    assert (connection.virtCtl is otherClient)
+    assert (connection.cli.virtCtl is otherClient)
+    assert (connection.cli.oc is virtualMachine.oc)
+    assert (connection.target.endswith('.cluster-one'))
+    virtualMachine.oc.GetResUID.assert_called_once_with(
+        'namespace/kube-system',
+    )
+    assert (virtualMachine.vm.cli.oc is virtualMachine.oc)
     assert (virtualMachine.vm.cli.virtCtl is virtualMachine.virtCtl)
 
 

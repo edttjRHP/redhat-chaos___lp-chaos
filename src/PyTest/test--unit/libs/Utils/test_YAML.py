@@ -128,12 +128,12 @@ def test_Render_VMtemplate_OrdersOptionalMappingsAndRetainsNativeTypes(
 
 
 @pytest.mark.parametrize('preset', [
-    'modelBase', 'modelNodeHog', 'modelMigrationStorm',
+    'modelGstOSwin', 'modelNodeHog', 'modelMigrationStorm',
 ])
 def test_Render_VMtemplate_PreservesPresetValuesAndExplicitDVname(
     preset: str,
 ) -> None:
-    settings = dict(getattr(PresetCtx, preset))
+    settings = PresetCtx.modelGstOSwin | getattr(PresetCtx, preset)
     context = REQUIRED_VM_CONTEXT | settings | {
         'vmName': 'native-vm', 'vmDataVolumeName': 'explicit-system-disk',
     }
@@ -607,23 +607,155 @@ def test_Render_VMtemplate_FixesStructuralWikiIdentifiers() -> None:
     assert (templateSpec['volumes'][1]['name'] == 'cloud-init-disk')
 
 
-def test_ToDict_HandlesDictYAMLandBlankInput() -> None:
+def test_ToDict_HandlesDictYAMLandRejectsBlankInput() -> None:
     original = {'answer': 42}
 
     assert (MUT.YAMLcfg.ToDict(original) is original)
     assert (MUT.YAMLcfg.ToDict('answer: 42') == original)
-    assert (MUT.YAMLcfg.ToDict('') == {})
+    with pytest.raises(TypeError): MUT.YAMLcfg.ToDict('')
 
 
 def test_ToJSON_HandlesYAMLandDict() -> None:
     assert (MUT.YAMLcfg.ToJSON('answer: 42', indent=0) == '{\n"answer": 42\n}')
     assert (MUT.YAMLcfg.ToJSON({'answer': 42}) == '{\n  "answer": 42\n}')
-    assert (MUT.YAMLcfg.ToJSON('') == '{}')
+    with pytest.raises(TypeError): MUT.YAMLcfg.ToJSON('')
 
 
-def test_ToYAML_HandlesJSONandDict() -> None:
+@pytest.mark.parametrize('data', [
+    'false', '0', '0.0', '[]', '""', '', ' \n', '# comment\n', 'null', '~',
+])
+def test_ToJSON_RejectsFalsyAndNullRoots(data: str) -> None:
+    with pytest.raises(TypeError): MUT.YAMLcfg.ToJSON(data)
+
+
+def test_ToYAML_HandlesYAMLJSONandDict() -> None:
     expected = 'answer: 42\n'
 
+    assert (MUT.YAMLcfg.ToYAML('answer: 42') == expected)
     assert (MUT.YAMLcfg.ToYAML('{"answer": 42}') == expected)
     assert (MUT.YAMLcfg.ToYAML({'answer': 42}) == expected)
     assert (yaml.safe_load(expected) == {'answer': 42})
+
+
+@pytest.mark.parametrize(('data', 'expected'), [
+    ({}, {}),
+    ('{}', {}),
+    ('answer: 42', {'answer': 42}),
+    ('{answer: 42}', {'answer': 42}),
+    ('{"answer": 42}', {'answer': 42}),
+    ({'value': None, 'items': [None, False, 0, '', [], {}]}, {
+        'value': None, 'items': [None, False, 0, '', [], {}],
+    }),
+    ('value: null\nitems: [null, false, 0, "", [], {}]', {
+        'value': None, 'items': [None, False, 0, '', [], {}],
+    }),
+    ('{"value": null, "items": [null, false, 0, "", [], {}]}', {
+        'value': None, 'items': [None, False, 0, '', [], {}],
+    }),
+])
+def test_ToDict_PreservesMappingsAndNestedValues(
+    data: object,
+    expected: dict,
+) -> None:
+    actual = MUT.YAMLcfg.ToDict(data)
+
+    assert isinstance(actual, dict)
+    assert (actual == expected)
+    if isinstance(data, dict): assert (actual is data)
+
+
+@pytest.mark.parametrize('data', [
+    None, False, True, 0, 1, 0.0, [], [1], (), set(), b'{}',
+    '', ' \n', '# comment\n', 'null', 'Null', 'NULL', '~',
+    'false', 'true', '0', '1', '0.0', '[]', '[1]', '- item',
+    '""', '"null"', 'text',
+])
+def test_ToDict_RejectsNonMappingInputs(data: object) -> None:
+    with pytest.raises(TypeError): MUT.YAMLcfg.ToDict(data)
+
+
+@pytest.mark.parametrize('data', ['{broken', 'value: [1, 2'])
+def test_ToDict_PropagatesMalformedInput(data: str) -> None:
+    with pytest.raises(yaml.YAMLError): MUT.YAMLcfg.ToDict(data)
+
+
+@pytest.mark.parametrize(('data', 'expected'), [
+    ({}, {}),
+    ('{}', {}),
+    ('answer: 42', {'answer': 42}),
+    ('{answer: 42}', {'answer': 42}),
+    ('{"answer": 42}', {'answer': 42}),
+    ({'value': None, 'items': [None, False, 0, '', [], {}]}, {
+        'value': None, 'items': [None, False, 0, '', [], {}],
+    }),
+    ('value: null\nitems: [null, false, 0, "", [], {}]', {
+        'value': None, 'items': [None, False, 0, '', [], {}],
+    }),
+    ('{"value": null, "items": [null, false, 0, "", [], {}]}', {
+        'value': None, 'items': [None, False, 0, '', [], {}],
+    }),
+])
+def test_ToJSON_PreservesMappingsAndNestedValues(
+    data: object,
+    expected: dict,
+) -> None:
+    actual = MUT.json.loads(MUT.YAMLcfg.ToJSON(data))
+
+    assert isinstance(actual, dict)
+    assert (actual == expected)
+
+
+@pytest.mark.parametrize('data', [
+    None, False, True, 0, 1, 0.0, [], [1], (), set(), b'{}',
+    '', ' \n', '# comment\n', 'null', 'Null', 'NULL', '~',
+    'false', 'true', '0', '1', '0.0', '[]', '[1]', '- item',
+    '""', '"null"', 'text',
+])
+def test_ToJSON_RejectsNonMappingInputs(data: object) -> None:
+    with pytest.raises(TypeError): MUT.YAMLcfg.ToJSON(data)
+
+
+@pytest.mark.parametrize('data', ['{broken', 'value: [1, 2'])
+def test_ToJSON_PropagatesMalformedInput(data: str) -> None:
+    with pytest.raises(yaml.YAMLError): MUT.YAMLcfg.ToJSON(data)
+
+
+@pytest.mark.parametrize(('data', 'expected'), [
+    ({}, {}),
+    ('{}', {}),
+    ('answer: 42', {'answer': 42}),
+    ('{answer: 42}', {'answer': 42}),
+    ('{"answer": 42}', {'answer': 42}),
+    ({'value': None, 'items': [None, False, 0, '', [], {}]}, {
+        'value': None, 'items': [None, False, 0, '', [], {}],
+    }),
+    ('value: null\nitems: [null, false, 0, "", [], {}]', {
+        'value': None, 'items': [None, False, 0, '', [], {}],
+    }),
+    ('{"value": null, "items": [null, false, 0, "", [], {}]}', {
+        'value': None, 'items': [None, False, 0, '', [], {}],
+    }),
+])
+def test_ToYAML_PreservesMappingsAndNestedValues(
+    data: object,
+    expected: dict,
+) -> None:
+    actual = yaml.safe_load(MUT.YAMLcfg.ToYAML(data))
+
+    assert isinstance(actual, dict)
+    assert (actual == expected)
+
+
+@pytest.mark.parametrize('data', [
+    None, False, True, 0, 1, 0.0, [], [1], (), set(), b'{}',
+    '', ' \n', '# comment\n', 'null', 'Null', 'NULL', '~',
+    'false', 'true', '0', '1', '0.0', '[]', '[1]', '- item',
+    '""', '"null"', 'text',
+])
+def test_ToYAML_RejectsNonMappingInputs(data: object) -> None:
+    with pytest.raises(TypeError): MUT.YAMLcfg.ToYAML(data)
+
+
+@pytest.mark.parametrize('data', ['{broken', 'value: [1, 2'])
+def test_ToYAML_PropagatesMalformedInput(data: str) -> None:
+    with pytest.raises(yaml.YAMLError): MUT.YAMLcfg.ToYAML(data)

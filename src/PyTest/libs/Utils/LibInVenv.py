@@ -99,15 +99,15 @@ class ModInVenv:
             exitObj = rcvErr = None
             try: (exitType, exitObj) = rcvPipe.recv()
             except Exception as ex: rcvErr= ex
+            if (rcvErr is not None):
+                raise RuntimeError(
+                    'Venv Worker tagged response is missing '
+                    f'(exit status: {proc.exitcode}).'
+                ) from rcvErr
             wait([proc.sentinel])
             with _START_LOCK:
                 proc.join()
                 exitStat = proc.exitcode
-            if (rcvErr is not None):
-                raise RuntimeError(
-                    'Venv Worker tagged response is missing '
-                    f'(exit status: {exitStat}).'
-                ) from rcvErr
             if exitStat:
                 raise RuntimeError(
                     f'Venv Worker exit status: {exitStat}\n'

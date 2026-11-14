@@ -39,7 +39,7 @@ class GoCobraCLI:
             Optional CmdExec instance (default: `new CmdExec()`).
         :param defOpts:
             Default values for common options, e.g.
-            `namespace='windows-bsod'`, `kubeconfig='/path/to/kcfg'`.
+            `namespace='windows-bsod'`, `kubeconfig='/path/to/kCfg'`.
         '''
         self.binExec = binExec
         self.cmdExec = cmdExec or CmdExec()

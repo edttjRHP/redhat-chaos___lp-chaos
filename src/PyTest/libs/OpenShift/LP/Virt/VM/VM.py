@@ -65,7 +65,9 @@ class VM:
         except Exception as error: clnFail.append(str(error))
         if clnFail:
             clnErr = 'VM cleanup failed: ' + '; '.join(clnFail)
-            if (primExc is None): raise RuntimeError(clnErr)
+            if (
+                (primExc is None) or isinstance(primExc, GeneratorExit)
+            ): raise RuntimeError(clnErr)
             logs.error('%s; preserving primary exception: %s', clnErr, primExc)
 
     def __init__(
@@ -108,10 +110,11 @@ class VM:
     def _Status(self) -> str:
         '''Query the VM's current `printableStatus` via `oc get`.'''
         result = self.cli.oc.Run(
-            'get', f'VirtualMachine/{self.name}',
-            o="jsonpath='{.status.printableStatus}'",
+            'get',
+            f'VirtualMachine/{self.name}',
+            o='jsonpath={.status.printableStatus}',
         )
-        return result.stdout.strip("'") if result.success else ''
+        return result.stdout if result.success else ''
 
     def Start(
         self,
@@ -175,8 +178,11 @@ class VM:
             Positive numeric SSH retry timeout in seconds (default: `300`).
         :param kwArgs:
             Forwarded to `RHOVsshCon.__init__` (override `user`, `idFile`,
-            `virtCtl`, etc.). Defaults to this VM's `virtCtl` client; pass
-            `virtCtl=None` to create a client using `ns` and `kubeconfig`.
+            `virtCtl`, `oc`, etc.). Defaults to this VM's client pair. Either
+            client can be overridden independently. Pass `virtCtl=None` or
+            `oc=None` to create the corresponding client using `ns` and
+            `kubeconfig`. The caller must ensure both clients address the same
+            cluster.
 
         :return:
             A new `RHOVsshCon` instance, probed for readiness.
@@ -187,6 +193,7 @@ class VM:
             'user': self.sshUsr,
             'idFile': (self.sshKey or '~/.ssh/id_ed25519'),
             'virtCtl': self.cli.virtCtl,
+            'oc': self.cli.oc,
         }
         conn = RHOVsshCon(**{**defArgs, **kwArgs})
         if not conn.Probe(timeout=probeTO):

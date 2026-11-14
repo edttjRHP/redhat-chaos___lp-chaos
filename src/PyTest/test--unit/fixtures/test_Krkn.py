@@ -25,6 +25,8 @@ def FixtureRequest(
     options.parent.mkdir(parents=True)
     options.write_text('sourceFile:\n  envVar: |\n    :\n')
     monkeypatch.delenv('IENG_PYTEST____FXT__KRKN____OPTS', raising=False)
+    for key in MUT._DEF__FXT_CFG.fxtInf.krknCfg.krknEnv:
+        monkeypatch.delenv(key, raising=False)
     return SimpleNamespace(config=SimpleNamespace(rootpath=tmp_path))
 
 
@@ -74,8 +76,14 @@ def test_FxtKrkn_YieldsFrozenObjectWithMutableContents(
     fixtureRequest.param = {
         'kCfg': '/synthetic/config', 'ns': 'custom-ns',
         'cliCfg': NamedDict(
-            ocCfg={'context': 'oc-context'},
-            vcCfg={'kubeconfig': '/synthetic/virt-config'},
+            ocCfg={
+                'context': 'oc-context',
+                'kubeconfig': '/synthetic/oc-config',
+            },
+            vcCfg={
+                'kubeconfig': '/synthetic/virt-config',
+                'server': 'https://synthetic.invalid',
+            },
         ),
         'fxtInf': fxtInf, 'testPars': testPars,
     }
@@ -101,9 +109,13 @@ def test_FxtKrkn_YieldsFrozenObjectWithMutableContents(
         assert (context.ns == 'custom-ns')
         assert (context.cli.oc is ocFactory.return_value)
         assert (context.cli.virtCtl is virtCtlFactory.return_value)
-        ocFactory.assert_called_once_with(ns='custom-ns', context='oc-context')
+        ocFactory.assert_called_once_with(
+            ns='custom-ns', context='oc-context',
+            kubeconfig='/synthetic/config',
+        )
         virtCtlFactory.assert_called_once_with(
-            ns='custom-ns', kubeconfig='/synthetic/virt-config',
+            ns='custom-ns', kubeconfig='/synthetic/config',
+            server='https://synthetic.invalid',
         )
         original = getattr(context, field)
         with pytest.raises(dataclasses.FrozenInstanceError):
@@ -143,8 +155,12 @@ def test_FxtKrkn_UsesDefaultConfigurationWithAbsentOrEmptyRequestParam(
         assert (context.ns == defaults.ns)
         assert (context.cli.oc is ocFactory.return_value)
         assert (context.cli.virtCtl is virtCtlFactory.return_value)
-        ocFactory.assert_called_once_with(ns=defaults.ns)
-        virtCtlFactory.assert_called_once_with(ns=defaults.ns)
+        ocFactory.assert_called_once_with(
+            ns=defaults.ns, kubeconfig=defaults.kCfg,
+        )
+        virtCtlFactory.assert_called_once_with(
+            ns=defaults.ns, kubeconfig=defaults.kCfg,
+        )
         with pytest.raises(StopIteration):
             next(generator)
     finally:
@@ -167,10 +183,14 @@ def test_FxtKrkn_PropagatesCLIFactoryErrors(
     with pytest.raises(RuntimeError) as raised:
         next(generator)
     assert (raised.value is error)
-    factories.oc.assert_called_once_with(ns=MUT._DEF__FXT_CFG.ns)
+    factories.oc.assert_called_once_with(
+        ns=MUT._DEF__FXT_CFG.ns, kubeconfig='fake-config',
+    )
     if (failingCLI == 'oc'): factories.virtCtl.assert_not_called()
     else:
-        factories.virtCtl.assert_called_once_with(ns=MUT._DEF__FXT_CFG.ns)
+        factories.virtCtl.assert_called_once_with(
+            ns=MUT._DEF__FXT_CFG.ns, kubeconfig='fake-config',
+        )
 
 
 @pytest.mark.parametrize('customOptions', [False, True])
@@ -187,6 +207,9 @@ def test_FxtKrkn_ConvertsOptionsChainsAndMergesContentEnvironment(
         options = root / 'custom options.yaml'
         monkeypatch.setenv('IENG_PYTEST____FXT__KRKN____OPTS', str(options))
     script = (
+        'export ENABLE_ES=True\n'
+        'export ES_SERVER=https://search.invalid\n'
+        'export ES_PORT=443\n'
         'export KRKN_TEST_OPTS_SHARED=config\n'
         'export KRKN_TEST_OPTS_ONLY="from content"\n'
         'unset KRKN_TEST_OPTS_REMOVE\n'
@@ -196,6 +219,9 @@ def test_FxtKrkn_ConvertsOptionsChainsAndMergesContentEnvironment(
         ''.join(f'    {line}\n' for line in script.splitlines()) +
         'blocked:\n  - not-valid: retained\n'
     )
+    monkeypatch.setenv('ENABLE_ES', 'True')
+    monkeypatch.setenv('ES_SERVER', 'https://search.invalid')
+    monkeypatch.setenv('ES_PORT', '443')
     monkeypatch.setenv('KRKN_TEST_OPTS_REMOVE', 'parent')
     monkeypatch.setenv('KRKN_TEST_OPTS_SHARED', 'parent')
     monkeypatch.delenv('KRKN_TEST_OPTS_ONLY', raising=False)
@@ -230,6 +256,7 @@ def test_FxtKrkn_ConvertsOptionsChainsAndMergesContentEnvironment(
     if indirectOverride:
         fixtureRequest.param = {'fxtInf': NamedDict(krknCfg=NamedDict(
             krknEnv={
+                'ENABLE_ES': 'False',
                 'KRKN_TEST_OPTS_SHARED': 'indirect',
                 'KRKN_TEST_OPTS_ONLY': None,
             },
@@ -262,12 +289,16 @@ def test_FxtKrkn_ConvertsOptionsChainsAndMergesContentEnvironment(
         assert (streams[0].getvalue() == script)
         expected = {
             **defaults['fxtInf']['krknCfg']['krknEnv'],
+            'ENABLE_ES': 'True',
+            'ES_SERVER': 'https://search.invalid',
+            'ES_PORT': '443',
             'KRKN_TEST_OPTS_SHARED': 'config',
             'KRKN_TEST_OPTS_ONLY': 'from content',
             'KRKN_TEST_OPTS_REMOVE': None,
         }
         if indirectOverride:
             expected.update({
+                'ENABLE_ES': 'False',
                 'KRKN_TEST_OPTS_SHARED': 'indirect',
                 'KRKN_TEST_OPTS_ONLY': None,
             })
@@ -275,6 +306,44 @@ def test_FxtKrkn_ConvertsOptionsChainsAndMergesContentEnvironment(
         assert (MUT._DEF__FXT_CFG.ToDict(NamedDict.NestedMode.ALL) == defaults)
         assert (dict(os.environ) == beforeEnv)
         with pytest.raises(StopIteration): next(generator)
+    finally:
+        generator.close()
+
+
+@pytest.mark.parametrize(('script', 'expectedPort'), [
+    (':', '443'),
+    ('export ES_PORT=8443', '8443'),
+    ('unset ES_PORT', None),
+    ('export ES_PORT=', ''),
+])
+def test_FxtKrkn_PreservesInheritedValuesAndOptionsPrecedence(
+    fixtureRequest: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    script: str,
+    expectedPort: str | None,
+) -> None:
+    options = fixtureRequest.config.rootpath / 'conf/Krkn/opts--krkn.yaml'
+    options.write_text('sourceFile:\n  envVar: |\n    ' + script + '\n')
+    inherited = {
+        'ENABLE_ES': 'True',
+        'ES_SERVER': 'https://search.invalid',
+        'ES_PORT': '443',
+    }
+    for (key, value) in inherited.items(): monkeypatch.setenv(key, value)
+    monkeypatch.setenv('KRKN_TEST_UNRELATED', 'not copied')
+    beforeEnv = dict(os.environ)
+    defaults = MUT._DEF__FXT_CFG.ToDict(NamedDict.NestedMode.ALL)
+    generator = MUT.FxtKrkn.__wrapped__(
+        fixtureRequest, mock.Mock(), mock.Mock(),
+    )
+    try:
+        context = next(generator)
+        assert (context.fxtInf.krknCfg.krknEnv == {
+            **inherited,
+            'ES_PORT': expectedPort,
+        })
+        assert (dict(os.environ) == beforeEnv)
+        assert (MUT._DEF__FXT_CFG.ToDict(NamedDict.NestedMode.ALL) == defaults)
     finally:
         generator.close()
 
@@ -295,6 +364,9 @@ def HubContext(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> NamedDict:
     scnDir = kHubRoot / 'pod-scenarios'
     krknRoot = tmp_path / 'krkn root'
     scnDir.mkdir(parents=True)
+    (scnDir / 'Dockerfile.template').write_text(
+        'LABEL krknctl.is_a_scenario=true\n'
+    )
     krknRoot.mkdir()
     runRoot = tmp_path / 'runs'
     runDir = runRoot / '20260203T040506Z--pod-scenarios'
@@ -355,10 +427,200 @@ def HubContext(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> NamedDict:
     )
 
 
+@pytest.mark.parametrize(('scnName', 'descriptor'), [
+    ('dummy-scenario', 'LABEL krknctl.is_a_scenario=true\n'),
+    ('pod-scenarios', None),
+    ('pod-scenarios', 'FROM scratch\n'),
+    ('pod-scenarios', 'LABEL krknctl.is_a_scenario=false\n'),
+])
+def test_Run_RejectsInvalidScenariosBeforeSourcingOrCreatingArtifacts(
+    hubContext: NamedDict,
+    monkeypatch: pytest.MonkeyPatch,
+    scnName: str,
+    descriptor: str | None,
+) -> None:
+    context = hubContext
+    scnDir = context.kHubRoot / scnName
+    if (scnDir != context.scnDir): context.scnDir.rename(scnDir)
+    dockerfile = scnDir / 'Dockerfile.template'
+    if (descriptor is None): dockerfile.unlink()
+    else: dockerfile.write_text(descriptor)
+    source = mock.Mock(wraps=MUT.DoShellSource)
+    monkeypatch.setattr(MUT, 'DoShellSource', source)
+    beforeEnv = dict(os.environ)
+    beforeCwd = Path.cwd()
+    with pytest.raises(AssertionError):
+        context.hub.Run(scnName)
+    source.assert_not_called()
+    assert not context.runRoot.exists()
+    assert (dict(os.environ) == beforeEnv)
+    assert (Path.cwd() == beforeCwd)
+
+
+@pytest.mark.parametrize('descriptor', [
+    'LABEL krknctl.is_a_scenario=true\n',
+    "LABEL krknctl.is_a_scenario='true'\n",
+    'FROM scratch\n  label KRKNCTL.IS_A_SCENARIO = "TRUE"  \n',
+])
+def test_Run_AcceptsScenarioLabelForms(
+    hubContext: NamedDict,
+    descriptor: str,
+) -> None:
+    context = hubContext
+    (context.scnDir / 'Dockerfile.template').write_text(descriptor)
+    result = context.hub.Run('pod-scenarios')
+    assert (result['observed'][-1] == 'root-scenario')
+    assert context.scnFile.is_file()
+    assert context.cfgFile.is_file()
+
+
+@pytest.mark.parametrize('name', [
+    '../outside', '/outside', 'a/../b', 'a/..', '..',
+])
+def test_Run_RejectsLexicalScenarioBeforeEffects_ReviewRegression(
+    hubContext: NamedDict,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    ctx = hubContext
+    if name.startswith('/'):
+        name = str(ctx.kHubRoot.parent / 'outside')
+    candidate = ctx.kHubRoot / name
+    candidate.mkdir(parents=True, exist_ok=True)
+    (candidate / 'Dockerfile.template').write_text(
+        'LABEL krknctl.is_a_scenario=true\n',
+    )
+    environment = mock.Mock()
+    source = mock.Mock()
+    executor = mock.Mock()
+    descriptor = mock.Mock(side_effect=AssertionError('descriptor was read'))
+    monkeypatch.setattr(MUT, 'TempEnv', environment)
+    monkeypatch.setattr(MUT, 'DoShellSource', source)
+    monkeypatch.setattr(MUT, 'CmdExec', executor)
+    monkeypatch.setattr(MUT.Path, 'read_text', descriptor)
+    with pytest.raises(AssertionError): ctx.hub.Run(name)
+    descriptor.assert_not_called()
+    environment.assert_not_called()
+    source.assert_not_called()
+    executor.assert_not_called()
+    assert not ctx.runRoot.exists()
+
+
+@pytest.mark.parametrize('name', [
+    Path('group/pod-scenarios'), Path('group/scenario'),
+    Path('foo..bar'), Path('group/..hidden'),
+])
+def test_Run_AcceptsNestedRelativePath_ReviewRegression(
+    hubContext: NamedDict,
+    name: Path,
+) -> None:
+    ctx = hubContext
+    nested = ctx.kHubRoot / name
+    nested.parent.mkdir(exist_ok=True)
+    ctx.scnDir.rename(nested)
+    result = ctx.hub.Run(name)
+    runDir = ctx.runRoot / ('20260203T040506Z--' + str(name))
+    assert (result['observed'][0] == runDir)
+    assert ((runDir / 'config/chaos.yaml').is_file())
+
+
+@pytest.mark.parametrize('configured,override,scriptValue', [
+    ('configured-config', None, None),
+    ('configured-config', 'call-config', None),
+    (None, None, 'script-config'),
+    ('configured-config', None, 'script-config'),
+    ('configured-config', 'call-config', 'script-config'),
+])
+def test_Run_InitialKubeconfigSeedAndLaterOverrides_ReviewRegression(
+    hubContext: NamedDict,
+    monkeypatch: pytest.MonkeyPatch,
+    configured: str | None,
+    override: str | None,
+    scriptValue: str | None,
+) -> None:
+    ctx = hubContext
+    monkeypatch.setenv('KRKN_KUBE_CONFIG', 'ambient-config')
+    with (ctx.kHubRoot / 'env.sh').open('a') as stream:
+        stream.write(
+            'export KRKN_TEST_KCFG_FROM_SEED="$KRKN_KUBE_CONFIG"\n'
+            'export KRKN_KUBE_CONFIG="${KRKN_KUBE_CONFIG:-hub-config}"\n'
+        )
+    if (scriptValue is not None):
+        with (ctx.scnDir / 'env.sh').open('a') as stream:
+            stream.write(f'export KRKN_KUBE_CONFIG={scriptValue}\n')
+    with (ctx.scnDir / 'selected.yaml.template').open('a') as stream:
+        stream.write('seed: "$KRKN_TEST_KCFG_FROM_SEED"\n')
+    with (ctx.kHubRoot / 'config.yaml.template').open('a') as stream:
+        stream.write('kubeconfig: "$KRKN_KUBE_CONFIG"\n')
+    originalSource = MUT.DoShellSource
+    sourced = []
+
+    def Source(**kwArgs: object) -> None:
+        sourced.append(os.environ.get('KRKN_KUBE_CONFIG'))
+        originalSource(**kwArgs)
+
+    monkeypatch.setattr(MUT, 'DoShellSource', Source)
+    config = {} if (configured is None) else {'KRKN_KUBE_CONFIG': configured}
+    overrides = {} if (override is None) else {'KRKN_KUBE_CONFIG': override}
+    beforeEnv = dict(os.environ)
+    result = ctx.hub.Run('pod-scenarios', overrides, fxtInf=NamedDict(
+        krknCfg=NamedDict(krknEnv=config),
+    ))
+    assert (sourced == ['fake-config'])
+    assert (ctx.scnFile.read_text().endswith('seed: "fake-config"\n'))
+    rendered = scriptValue or 'fake-config'
+    assert (ctx.cfgFile.read_text().endswith(f'kubeconfig: "{rendered}"\n'))
+    assert (result['observed'][3] == (override or rendered))
+    assert (dict(os.environ) == beforeEnv)
+
+
+@pytest.mark.parametrize('label,accepted', [
+    (None, False), ('', False), ('LABEL krknctl.is_a_scenario=false', False),
+    ('LABEL other=true', False),
+    ('LABEL krknctl.is_a_scenario=true', True),
+    ('  label krknctl.is_a_scenario = "true"  ', True),
+    ("LABEL krknctl.is_a_scenario='true'", True),
+])
+def test_Run_ScenarioDescriptorBoundary_ReviewRegression(
+    hubContext: NamedDict,
+    monkeypatch: pytest.MonkeyPatch,
+    label: str | None,
+    accepted: bool,
+) -> None:
+    descriptor = hubContext.scnDir / 'Dockerfile.template'
+    source = mock.Mock(wraps=MUT.DoShellSource)
+    monkeypatch.setattr(MUT, 'DoShellSource', source)
+    if (label is None): descriptor.unlink()
+    else: descriptor.write_text(label + '\n')
+    if accepted:
+        hubContext.hub.Run('pod-scenarios')
+        assert hubContext.cfgFile.exists()
+    else:
+        with pytest.raises(AssertionError): hubContext.hub.Run('pod-scenarios')
+        source.assert_not_called()
+        assert not hubContext.runRoot.exists()
+
+
+def test_Run_RejectsDummyBeforeSource_ReviewRegression(
+    hubContext: NamedDict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dummy = hubContext.kHubRoot / 'dummy-scenario'
+    dummy.mkdir()
+    (dummy / 'Dockerfile.template').write_text(
+        'LABEL krknctl.is_a_scenario=true\n',
+    )
+    source = mock.Mock()
+    monkeypatch.setattr(MUT, 'DoShellSource', source)
+    with pytest.raises(AssertionError): hubContext.hub.Run('dummy-scenario')
+    source.assert_not_called()
+    assert not hubContext.runRoot.exists()
+
+
 @pytest.mark.parametrize('debug', [None, 'False', 'True', 'true', '1'])
 @pytest.mark.parametrize('overrides', [None, {}, {
     'KRKN_KUBE_CONFIG': 'override-config', 'KRKN_TEST_ORDER': 7,
-    'KRKN_TEST_REMOVE': None,
+    'KRKN_TEST_REMOVE': None, 'ALERTS_PATH': 'execution-only',
 }])
 def test_Run_RendersSelectedTemplatesAndPreservesDispatchContract(
     hubContext: NamedDict,
@@ -378,8 +640,15 @@ def test_Run_RendersSelectedTemplatesAndPreservesDispatchContract(
     monkeypatch.setattr(MUT, 'DoShellSource', source)
     monkeypatch.setattr(MUT, 'RunFromPath', runner)
     initialGlobals = {'injected': object()}
+    with context.script.open('a') as stream:
+        stream.write('alertsPath = os.getenv("ALERTS_PATH")\n')
     result = context.hub.Run(
         'pod-scenarios', overrides, initialGlobals, 'synthetic_run',
+        fxtInf=NamedDict(krknCfg=NamedDict(krknEnv={
+            'KRKN_TEST_ORDER': 'configured',
+            'KRKN_TEST_REMOVE': 'configured',
+            'ALERTS_PATH': 'configured/alerts.yaml',
+        })),
     )
     args = [f'--config={context.cfgFile}']
     if (debug == 'True'): args.extend(['--debug', 'True'])
@@ -387,12 +656,7 @@ def test_Run_RendersSelectedTemplatesAndPreservesDispatchContract(
         context.kHubRoot / 'env.sh', context.scnDir / 'env.sh',
     ])
     runner.assert_called_once_with(
-        context.script, args,
-        {
-            'KRKN_KUBE_CONFIG': 'fake-config',
-            **context.hub.iPars.fxtCfgObj.fxtInf.krknCfg.krknEnv,
-            **(overrides or {}),
-        },
+        context.script, args, (overrides or {}),
         initialGlobals, 'synthetic_run',
     )
     assert (result['injected'] is initialGlobals['injected'])
@@ -400,6 +664,9 @@ def test_Run_RendersSelectedTemplatesAndPreservesDispatchContract(
         context.runDir, args, 'synthetic_run',
         (overrides or {}).get('KRKN_KUBE_CONFIG', 'fake-config'), None,
         '7' if overrides else 'root-scenario',
+    ))
+    assert (result['alertsPath'] == (overrides or {}).get(
+        'ALERTS_PATH', str(context.krknRoot / 'config/alerts.yaml'),
     ))
     assert (context.scnFile.read_text() == (
         'value: "root-scenario"\nliteral: "${UNCHANGED:-default}"\n'

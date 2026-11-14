@@ -1,5 +1,5 @@
 sourceFile:
-  envVar: | # Trusted Bash Shell Script.
+  envVar: | # Trusted Bash Shell Script (to be `source`:d).
     export ENABLE_ES="${ENABLE_ES:-True}"
     export ES_SERVER="${ES_SERVER:-https://open-search.lp-chaos--svc--web-app.chaos.lp.devcluster.openshift.com}"
     export ES_PORT="${ES_PORT:-443}"

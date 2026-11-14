@@ -1,4 +1,9 @@
-'''Optional VM template contexts.'''
+'''
+Optional VM template contexts.
+
+One or more (merged) of these models can be used to pre-seed the
+`fxtInf.vmCfg.ctxData` in Fixture Configuration.
+'''
 import os
 
 

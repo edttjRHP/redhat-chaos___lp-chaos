@@ -1,0 +1,90 @@
+import logging
+from pathlib import Path
+import time
+from typing import TYPE_CHECKING
+
+import pytest
+
+from libs.CustomTypes import NamedDict
+
+
+if TYPE_CHECKING:
+    from fixtures.BenchmarkRunner import FxtObjVMbyBR
+
+
+logs = logging.getLogger()
+
+
+class TestBR():
+    '''BenchmarkRunner readiness and optional guest-access examples.'''
+
+    @pytest.mark.skip(reason='VM connectivity needs investigation.')
+    @pytest.mark.vm__br
+    @pytest.mark.parametrize(
+        'fxtVMbyBR,',
+        [({
+            'ns': 'br-test',
+            'fxtInf': NamedDict(brCfg=NamedDict(count=1)),
+        },)],
+        indirect=True,
+    )
+    def test_VMcreateByBR_VMacceptsSSHcommands(
+        self,
+        fxtVMbyBR: 'FxtObjVMbyBR',
+    ) -> None:
+        '''Create a VM then test its connectivity via SSH.'''
+        testVM = fxtVMbyBR.vmList[0]
+        logs.info(f'VM name: {testVM.name}')
+        logs.info(f'SSH target: {testVM.ssh.target}')
+
+        start = time.perf_counter()
+        result = testVM.ssh.RunPowerShell(
+            'Get-ComputerInfo | Select-Object CsName'
+        )
+        logs.info(f'Execution time: {(time.perf_counter()-start)}')
+        assert result.success
+        logs.info(result.stdout)
+
+        start = time.perf_counter()
+        result = testVM.ssh.Send(
+            Path('/Users/vvijay/scripts/guest/churn.ps1'),
+            'C:/TEMP/',
+        )
+        logs.info(f'Execution time: {(time.perf_counter()-start)}')
+        assert result.success
+
+        start = time.perf_counter()
+        result = testVM.ssh.Recv(
+            Path('C:/TEMP/churn.ps1'),
+            '/Users/vvijay/scripts/check',
+        )
+        logs.info(f'Execution time: {(time.perf_counter()-start)}')
+        assert result.success
+
+    @pytest.mark.vm__br
+    @pytest.mark.parametrize(
+        'fxtVMbyBR,',
+        [({'fxtInf': NamedDict(brCfg=NamedDict(count=2))},)],
+        indirect=True,
+    )
+    def test_BenchmarkRunner_CreatesTwoReadyVMs(
+        self,
+        fxtVMbyBR: 'FxtObjVMbyBR',
+    ) -> None:
+        '''Create two distinct VMs and verify their Ready conditions.'''
+        assert (len(fxtVMbyBR.vmList) == 2), (
+            f'Expected 2 VMs created, got {len(fxtVMbyBR.vmList)}: '
+            f'{[vm.name for vm in fxtVMbyBR.vmList]!r}'
+        )
+        vmIDs = {(vm.namespace, vm.name) for vm in fxtVMbyBR.vmList}
+        assert (len(vmIDs) == 2), 'Expected distinct VM identities.'
+        for vm in fxtVMbyBR.vmList:
+            assert (vm.namespace and vm.name)
+            logs.info(f'VM name: {vm.name}')
+            result = vm.cli.oc.Run(
+                'wait', f'VirtualMachine/{vm.name}',
+                **{'for': 'condition=Ready'},
+            )
+            assert result.success, (
+                f'VM `{vm.namespace}/{vm.name}` did not become Ready.'
+            )

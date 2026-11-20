@@ -29,7 +29,7 @@ from libs.Utils.YAML import YAMLcfg
 logs = logging.getLogger()
 _DEF__FXT_CFG = NamedDict(
     kCfg=(
-        os.environ.get('KUBECONFIG') or
+        os.getenv('KUBECONFIG') or
         os.path.expanduser('~/.kube/config')
     ),
     # The `--kubeconfig` option will be overridden by the above `.kCfg`.

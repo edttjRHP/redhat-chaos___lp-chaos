@@ -16,15 +16,21 @@ def test_Chaos(fxtKrkn: FxtObjKrkn) -> None:
 ```
 
 Select and configure the scenario for your test, assert the expected CUT recovery, and provide appropriate cleanup. This is a usage example, not a portable
-acceptance test. Both repository `krkn` example tests are skipped placeholders. See the complete
-[fixture configuration and parametrization](../fixtures/Krkn.py#L309) and [runner API reference](../fixtures/Krkn.py#L121) for all parameters and returned
+acceptance test. Select the repository example with the `krkn` marker: the [pod-scenario example](../test--suites/ts--example/test_Krkn.py) creates its
+own Namespace and Deployment (KrknHub Pod Scenarios kill existing Pods), kills that Pod, and checks its replacement. See the complete
+[fixture configuration and parametrization](../fixtures/Krkn.py#L340) and [runner API reference](../fixtures/Krkn.py#L121) for all parameters and returned
 values.
 
 
 ## Configuration
 
-- Install Krkn and KrknHub at `fxtInf.rootPath.krkn` and `fxtInf.rootPath.krknHub` (defaults: `vendor/krkn` and `vendor/krknHub` under the PyTest root). GNU
-  `envsubst` must be on `PATH`; environment loading uses Bash.
+- Install Krkn and KrknHub at `fxtInf.rootPath.krkn` and `fxtInf.rootPath.krknHub` (defaults: `vendor/krkn` and `vendor/krknHub` under the PyTest root).
+  `setup.sh` runs `setup--fxt--Krkn.sh`, which extracts the public `main` branch archives into `IENG_PYTEST____FXT__KRKN____DEF_FXT_CFG__ROOTPATH_KRKN` and
+  `IENG_PYTEST____FXT__KRKN____DEF_FXT_CFG__ROOTPATH_KRKNHUB` (relative paths resolve from the PyTest root) and keeps existing directories.
+- GNU `envsubst` must be on `PATH`: the runner renders the scenario and config templates with it. It is a host binary, not a Python package, so
+  `setup--fxt--Krkn.sh` exits, before any download, whenever the command is missing (it checks presence only, not the GNU implementation). Install it with,
+  e.g., `dnf install /usr/bin/envsubst` (DNF installs the package that provides that file) or `apt-get install gettext-base` (Debian / Ubuntu). Environment
+  loading uses Bash.
 - Select a scenario directory other than `dummy-scenario`. Before loading environment scripts, the runner requires its `Dockerfile.template` to contain a
   standalone `LABEL krknctl.is_a_scenario=true` line (case-insensitive; whitespace and quotes around `true` are accepted).
 - Select fixture options with `IENG_PYTEST____FXT__KRKN____OPTS` (default: `conf/Krkn/opts--krkn.yaml` under the PyTest root). `sourceFile.envVar` is trusted
@@ -32,11 +38,12 @@ values.
   adapt the endpoint or disable collection.
 - Configure via indirect parametrization with `ns`, `kCfg`, `cliCfg`, `testPars`, and nested `NamedDict` settings. `kCfg` is passed as `KRKN_KUBE_CONFIG`; use
   an absolute path and align CLI context with the same CUT.
-- `fxtInf.krknCfg.krknEnv` applies before KrknHub main `env.sh` and then Scenario `env.sh` are loaded. These scripts can change settings;
+- The `fxtInf.krknCfg.krknEnv` applies before KrknHub main `env.sh` and then Scenario `env.sh` are loaded. These scripts can change settings;
   `Run(..., envVars=...)` overrides only the final runner invocation, not loading, rendering, or preparation.
-- Set `KRKN_HUB__TEMPLATE__CFG__FN` relative to the KrknHub root and `KRKN_HUB__TEMPL__SCN__FN` relative to the scenario directory; absolute paths also work.
-  `SCENARIO_FILE` names the rendered scenario. If present, scenario `prep.sh` runs directly after rendering and before dispatch; it must be executable with a
-  valid shebang. Failure stops dispatch.
+- The scenario template is `SCENARIO_TEMPLATE_FILE` (set by the Scenario `env.sh`), relative to the scenario directory, and the config template is
+  `CONFIG_FILE_TEMPLATE` (set by the KrknHub main `env.sh`), relative to the KrknHub root; absolute paths also work.
+- The `SCENARIO_FILE` names the rendered scenario.
+- If present, scenario `prep.sh` runs directly after rendering and before dispatch; it must be executable with a valid shebang.
 
 The bundle exposes `krknHub`, resolved `fxtInf`, caller `testPars`, `cli.oc`, `cli.virtCtl`, and `ns`. Setting `ns` does not limit every vendor scenario to
 that namespace: verify its actual selectors and disruption scope.

@@ -39,6 +39,7 @@ def RHOVIO(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(MUT, 'os', SimpleNamespace(
         path=SimpleNamespace(expandvars=expandvars),
         environ=environ,
+        getenv=environ.get,
     ))
     monkeypatch.setattr(MUT, 'Path', pathFactory)
     return SimpleNamespace(

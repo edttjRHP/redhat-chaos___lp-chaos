@@ -26,6 +26,11 @@ vendor/BenchmarkRunner}"
         python3 -m venv --clear "${vEnvRootArr[${fxtID}]}"
         "${vEnvRootArr[${fxtID}]}/bin/pip" install -r "${e}"
     done
+    for e in \
+        "${_scrPath}/setup--fxt--"*'.sh' \
+    ; do
+        bash "${e}"
+    done
 true )
 
 true

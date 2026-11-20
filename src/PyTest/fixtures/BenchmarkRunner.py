@@ -27,7 +27,7 @@ from libs.Utils.LibInVenv import ModInVenv
 logs = logging.getLogger()
 _DEF__FXT_CFG = NamedDict(
     kCfg=(
-        os.environ.get('KUBECONFIG') or
+        os.getenv('KUBECONFIG') or
         os.path.expanduser('~/.kube/config')
     ),
     # The `--kubeconfig` option will be overridden by the above `.kCfg`.
@@ -173,9 +173,9 @@ def VMcreateByBR(
         'DELETE_ALL': 'no',
         'SAVE_ARTIFACTS_LOCAL': 'true',
         'RUN_ARTIFACTS_PATH': (
-            os.environ.get('RUN_ARTIFACTS_PATH') or tempfile.mkdtemp()
+            os.getenv('RUN_ARTIFACTS_PATH') or tempfile.mkdtemp()
         ),
-        'SCALE_NODES': (os.environ.get('SCALE_NODES', '')),
+        'SCALE_NODES': (os.getenv('SCALE_NODES', '')),
         'UUID': invocationUUID,
     }
     if isScale:

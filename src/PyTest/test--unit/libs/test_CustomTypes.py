@@ -1259,7 +1259,9 @@ def test_TempEnv_RestoresEnvironmentAndPropagatesExceptions(
 ) -> None:
     original = {'changed': 'before', 'unchanged': 'same', 'removed': 'restore'}
     environ = original.copy()
-    monkeypatch.setattr(MUT, 'os', mock.Mock(environ=environ))
+    monkeypatch.setattr(
+        MUT, 'os', mock.Mock(environ=environ, getenv=environ.get),
+    )
     tempEnv = MUT.TempEnv()
 
     with pytest.raises(RuntimeError, match='sentinel'):

@@ -71,7 +71,7 @@ def _CallInVenv(
             *(
                 os.environ['PYTHONPATH'].split(
                     os.pathsep
-                ) if os.environ.get('PYTHONPATH') else []
+                ) if os.getenv('PYTHONPATH') else []
             ),
             str(stdlib.parent / zipName),
             paths['stdlib'], paths['platstdlib'],

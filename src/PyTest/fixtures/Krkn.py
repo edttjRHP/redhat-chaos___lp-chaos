@@ -11,7 +11,6 @@ Dependencies:
     - https://github.com/krkn-chaos/krkn-hub
 '''
 from collections.abc import Callable, Generator
-from contextlib import chdir
 import dataclasses
 from datetime import datetime, timezone
 from io import StringIO
@@ -34,7 +33,7 @@ from libs.Utils.YAML import YAMLcfg
 logs = logging.getLogger()
 _DEF__FXT_CFG = NamedDict(
     kCfg=(
-        os.environ.get('KUBECONFIG') or
+        os.getenv('KUBECONFIG') or
         os.path.expanduser('~/.kube/config')
     ),
     # The `--kubeconfig` option will be overridden by the above `.kCfg`.
@@ -193,12 +192,6 @@ class KrknHub:
         )
 
         with TempEnv():
-            UpdEnv({
-                **fxtCfg.fxtInf.krknCfg.krknEnv,
-                'KRKN_KUBE_CONFIG': fxtCfg.kCfg,
-            })
-            DoShellSource(envFiles=[kHubRoot / 'env.sh', scnDir / 'env.sh'])
-
 #           Krkn configuration items that referencing file or dir. have
 #           different path resolution algorithm (in `krkn-hub`, each item's
 #           value is controlled by an Env. Var.). The configuration paths
@@ -228,38 +221,67 @@ class KrknHub:
 #                   ```yaml
 #                   kraken.image_signature_public_key   # Set to a fixed value.
 #                   ```
+            UpdEnv({
+                **{
+                    eVar: os.getenv(eVar, dVal)
+                    for (eVar, dVal) in (
+                        # Env. Var. that has abs. path as it default value.
+                        ('ROLLBACK_VERSIONS_DIRECTORY', 'krkn--rollback'),
+                        ('TELEMETRY_ARCHIVE_PATH', 'krkn--telemetry'),
+                    )
+                },
+                **fxtCfg.fxtInf.krknCfg.krknEnv,
+                'KRKN_KUBE_CONFIG': fxtCfg.kCfg,
+            })
+            DoShellSource(envFiles=[kHubRoot / 'env.sh', scnDir / 'env.sh'])
             (runDir := Path(os.getenv(
                 'IENG_PYTEST____FXT__KRKN____KRKN__RUN_DIR__ROOT',
                 '/tmp/run-dir--krkn',
             )).resolve() / (
                 f'{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}--{scnName}'
             )).mkdir(parents=True, exist_ok=False)
+            # NOTE: the Krkn runtime CWD will be `runDir`.
             UpdEnv({
-                envVar: (root / os.environ[envVar]).resolve()
-                for (root, envVar) in (
+                eVar: (rPath / os.environ[eVar]).resolve()
+                for (rPath, eVarLst) in (
+                    # The following Env. Var. (default values are rel. path) by
+                    #   default use the model under `krknRoot`.
+                    # Unless pointing to other model under `krknHub`, if any,
+                    #   set to abs. path to override.
                     (krknRoot, (
-                        'ALERTS_PATH', 'METRICS_PATH', 'RESILIENCY_FILE',
+                        # Set (with default) in KrknHub main `env.sh`.
+                        'ALERTS_PATH',
+                        'METRICS_PATH',
+                        'RESILIENCY_FILE',
                     )),
+                    # If set to rel. path, it's towards Krkn runtime CWD.
                     (runDir, (
-                        'SCENARIO_FILE', 'ROLLBACK_VERSIONS_DIRECTORY',
+                        # Set (with default) in KrknHub main `env.sh`.
+                        'KRKN_KUBE_CONFIG',
+                        'ROLLBACK_VERSIONS_DIRECTORY',
                         'TELEMETRY_ARCHIVE_PATH',
+                        # Set in Scenario `env.sh`.
+                        'SCENARIO_FILE',
                     )),
                 )
-                for envVar in envVar if os.environ.get(envVar)
+                for eVar in eVarLst if os.getenv(eVar)
             })
-            cfgTmpl = (
-                kHubRoot / os.environ['KRKN_HUB__TEMPLATE__CFG__FN']
-            ).resolve()
-            scnTmpl = (
-                scnDir / os.environ['KRKN_HUB__TEMPL__SCN__FN']
-            ).resolve()
-            cfgFile = (runDir / 'config/chaos.yaml').resolve()
+            (scnTmpl, cfgTmpl) = (
+                (rPath / os.environ[eVar]).resolve()
+                for (rPath, eVar) in (
+                    # Set in Scenario `env.sh`.
+                    (scnDir, 'SCENARIO_TEMPLATE_FILE'),
+                    # Set (with default) in KrknHub main `env.sh`.
+                    (kHubRoot, 'CONFIG_FILE_TEMPLATE'),
+                )
+            )
             scnFile = Path(os.environ['SCENARIO_FILE'])
+            cfgFile = (runDir / 'config/chaos.yaml').resolve()
             for dir in (cfgFile.parent, scnFile.parent, *(
                 Path(os.environ[envVar])
                 for envVar in (
                     'ROLLBACK_VERSIONS_DIRECTORY', 'TELEMETRY_ARCHIVE_PATH',
-                ) if os.environ.get(envVar)
+                ) if os.getenv(envVar)
             )):
                 dir.mkdir(parents=True, exist_ok=True)
             for (tmpl, output) in (
@@ -288,18 +310,29 @@ class KrknHub:
 
             # Prepare Krkn CLI arguments.
             krknArgs = [f'--config={cfgFile}']
-            if (os.environ.get('KRKN_DEBUG') == 'True'):
+            if (os.getenv('KRKN_DEBUG') == 'True'):
+                # Use a 20-backtick fence to allow nested Markdown code blocks
+                #   within the logged content with minimal collision risk.
+                mdFence = '`' * 20
+                for (desc, path) in (
+                    ('Krkn Config', cfgFile),
+                    ('Krkn Scenario', scnFile),
+                ):
+                    logs.info(
+                        f'{desc} (`{path}`):\n{mdFence}yaml\n'
+                        f'{path.read_text().rstrip()}\n{mdFence}'
+                    )
                 krknArgs.extend(['--debug', 'True'])
 
-            # Execute Krkn.
-            with chdir(runDir):
-                return RunFromPath(
-                    krknRun,
-                    krknArgs,
-                    (envVars or {}),
-                    initGlb,
-                    runName,
-                )
+            # Execute Krkn in `runDir`.
+            return RunFromPath(
+                krknRun,
+                krknArgs,
+                runDir,
+                (envVars or {}),
+                initGlb,
+                runName,
+            )
 
 
 @pytest.fixture(name='fxtKrkn', scope='function')

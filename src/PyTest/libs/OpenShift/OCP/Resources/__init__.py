@@ -56,6 +56,43 @@ class SpecMismatch(RuntimeError):
     '''
 
 
+def GetUIDs(yamlRes: Union[str, dict[str, Any]]) -> set[str]:
+    '''
+    Get the UIDs of non-terminating resources.
+
+    Accept a single resource or a resource list (with `.items`), e.g. the
+    output of `oc get <resType>{[s]|/<resName>} ... -o {json|yaml}`. A named
+    lookup (`<resType>/<resName>`) returns the resource itself. A list or
+    selector lookup (`<resType>[s]`) returns `.items`. Each resource is assumed
+    to have `.metadata.uid` key.
+
+    Resources being deleted are excluded.
+
+    :param yamlRes:
+        A (list of) Resource YAML / JSON text, or its already parsed `dict`.
+
+    :return:    A `set` of the `metadata.uid` of non-terminating resources.
+
+    :raises TypeError:
+        The input is not a resource mapping, or its `items` is not a list.
+    '''
+    res = yaml.safe_load(yamlRes) if isinstance(yamlRes, str) else yamlRes
+    if not isinstance(res, dict):
+        raise TypeError(
+            f'Expected a resource map, got `{type(res).__name__}`.'
+        )
+    items = res['items'] if ('items' in res) else [res]
+    if not isinstance(items, list):
+        raise TypeError(
+            f'Expected `.items` as a list, got `{type(items).__name__}`.'
+        )
+    return {
+        item['metadata']['uid']
+        for item in items
+        if ('deletionTimestamp' not in item['metadata'])
+    }
+
+
 def _ValResCfg(
     resCfg: ResCfg,
     vldMeta: set,

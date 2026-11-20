@@ -1,3 +1,7 @@
+from collections.abc import Iterator
+import os
+from pathlib import Path
+import sys
 from unittest import mock
 
 import pytest
@@ -305,7 +309,7 @@ def test_ImportFromPath_RejectsMissingSpecOrLoader(
     importer.util.module_from_spec.assert_not_called()
 
 
-def test_RunFromPath_PassesArgumentsAndRestoresArgv(
+def test_RunFromPath_PassesArgumentsAndRestoresArgvAndPath(
     monkeypatch: pytest.MonkeyPatch,
     moduleState: mock.MagicMock,
 ) -> None:
@@ -314,6 +318,11 @@ def test_RunFromPath_PassesArgumentsAndRestoresArgv(
         ('/', 'synthetic', 'entry.py'),
         pathText='/synthetic/entry.py',
     )
+    path.parent.__str__.return_value = '/synthetic'
+    # Without `workDir`, the script path is joined to the caller CWD (`.`).
+    base = mock.MagicMock()
+    base.__truediv__.return_value = path
+    pathFactory.return_value = base
     tempEnv = mock.MagicMock()
     tempEnvFactory = mock.Mock(return_value=tempEnv)
     updateEnv = mock.Mock()
@@ -327,6 +336,7 @@ def test_RunFromPath_PassesArgumentsAndRestoresArgv(
         run_name: str,
     ) -> dict:
         observed['argv'] = list(moduleState.argv)
+        observed['path'] = list(moduleState.path)
         return result
 
     runpy.run_path.side_effect = CaptureRunPath
@@ -336,15 +346,25 @@ def test_RunFromPath_PassesArgumentsAndRestoresArgv(
     envVars = {'UNIT_DYN_REMOVE': None, 'UNIT_DYN_VALUE': 7}
     initGlobals = {'injected': 'safe-global'}
     beforeArgs = moduleState.argv
+    beforePath = moduleState.path
+    chdir = mock.Mock()
+    monkeypatch.setattr(MUT, 'chdir', chdir)
 
     runResult = MUT.RunFromPath(
-        'entry.py', [42, 'tail'], envVars, initGlobals,
+        'entry.py', [42, 'tail'], None, envVars, initGlobals,
     )
 
     assert (runResult is result)
     assert (observed['argv'] == ['/synthetic/entry.py', '42', 'tail'])
     assert (moduleState.argv is beforeArgs)
-    pathFactory.assert_called_once_with('entry.py')
+    # The script directory leads `sys.path` only while the script runs.
+    assert (observed['path'] == ['/synthetic', '/synthetic/import-path'])
+    assert (moduleState.path is beforePath)
+    assert (moduleState.path == ['/synthetic/import-path'])
+    # Without `workDir`, the working directory is left alone.
+    chdir.assert_not_called()
+    pathFactory.assert_called_once_with('.')
+    base.__truediv__.assert_called_once_with('entry.py')
     path.resolve.assert_called_once_with()
     path.is_file.assert_called_once_with()
     tempEnvFactory.assert_called_once_with()
@@ -359,6 +379,7 @@ def test_RunFromPath_PassesArgumentsAndRestoresArgv(
 
 def test_RunFromPath_RejectsMissingFile(
     monkeypatch: pytest.MonkeyPatch,
+    moduleState: mock.MagicMock,
 ) -> None:
     (pathFactory, path, _) = PreparePath(
         monkeypatch,
@@ -366,6 +387,9 @@ def test_RunFromPath_RejectsMissingFile(
         fileExists=False,
         pathText='/synthetic/absent.py',
     )
+    base = mock.MagicMock()
+    base.__truediv__.return_value = path
+    pathFactory.return_value = base
     tempEnvFactory = mock.Mock()
     updateEnv = mock.Mock()
     runpy = mock.Mock()
@@ -376,11 +400,13 @@ def test_RunFromPath_RejectsMissingFile(
     with pytest.raises(FileNotFoundError, match='Target script'):
         MUT.RunFromPath('absent.py')
 
-    pathFactory.assert_called_once_with('absent.py')
+    pathFactory.assert_called_once_with('.')
+    base.__truediv__.assert_called_once_with('absent.py')
     path.is_file.assert_called_once_with()
     tempEnvFactory.assert_not_called()
     updateEnv.assert_not_called()
     runpy.run_path.assert_not_called()
+    assert (moduleState.path == ['/synthetic/import-path'])
 
 
 def test_UpdEnv_EmptyUpdatesLeaveEnvironmentUnchanged(
@@ -441,3 +467,141 @@ def test_UpdEnv_PreservesConversionErrorAndEarlierUpdates(
     assert (environment['UNIT_UPD_FIRST'] == 'temporary')
     assert (environment['UNIT_UPD_EXISTING'] == 'original')
     assert ('UNIT_UPD_BAD' not in environment)
+
+
+# A script importing its sibling package, as `python <script>` allows.
+siblingScript = """\
+import os
+import sys
+
+import DynLoadSibling
+
+DynLoadSibling.seen = {
+    'path': list(sys.path), 'argv': list(sys.argv), 'cwd': os.getcwd(),
+    'name': __name__, 'injected': injected,
+}
+sys.path.append('/polluted/by/script')
+sys.argv.append('polluted-by-script')
+if (outcome == 'exit'): raise SystemExit(3)
+if (outcome == 'raise'): raise RuntimeError('synthetic script failure')
+result = 'returned'
+"""
+
+
+@pytest.fixture(name='siblingTree')
+def SiblingTree(tmp_path: Path) -> Iterator[Path]:
+    '''
+    Yield a real script directory: `entry.py` beside its sibling package.
+
+    :yield: The script directory.
+    '''
+    assert ('DynLoadSibling' not in sys.modules)
+    scrDir = tmp_path / 'app'
+    (scrDir / 'DynLoadSibling').mkdir(parents=True)
+    (scrDir / 'DynLoadSibling' / '__init__.py').write_text('seen = None\n')
+    (scrDir / 'entry.py').write_text(siblingScript)
+    yield scrDir
+    # Drop the imported sibling package and the script directory finder cache.
+    sys.modules.pop('DynLoadSibling', None)
+    sys.path_importer_cache.pop(str(scrDir.resolve()), None)
+
+
+@pytest.mark.parametrize('outcome', ['return', 'exit', 'raise'])
+@pytest.mark.parametrize('workDirForm', [None, 'relative', 'absolute'])
+@pytest.mark.parametrize('relative', [False, True])
+def test_RunFromPath_ImportsSiblingLikePythonScriptAndRestoresState(
+    monkeypatch: pytest.MonkeyPatch,
+    siblingTree: Path,
+    relative: bool,
+    workDirForm: str | None,
+    outcome: str,
+) -> None:
+    # Use the real `sys`, `Path`, `TempEnv` and `runpy` on an on-disk script.
+    monkeypatch.setattr(MUT, 'sys', sys)
+    monkeypatch.chdir(siblingTree.parent)
+    (siblingTree.parent / 'work').mkdir()
+    workDir = {
+        None: None, 'relative': 'work',
+        'absolute': (siblingTree.parent / 'work'),
+    }[workDirForm]
+    # A relative script path resolves against `workDir` if given, else the
+    #   caller CWD; an absolute one is used as is.
+    if not relative: scrPath = siblingTree / 'entry.py'
+    elif (workDir is None): scrPath = 'app/entry.py'
+    # Valid only relative to `workDir` (`work/`), not to the caller CWD.
+    else: scrPath = '../app/entry.py'
+    scrDir = siblingTree.resolve()
+    (origPath, origPathEntries) = (sys.path, list(sys.path))
+    (origArgv, origArgvEntries) = (sys.argv, list(sys.argv))
+    cwd = os.getcwd()
+    # The script runs in `workDir` if given, else in the caller CWD.
+    childCwd = (
+        cwd if (workDir is None)
+        else str((siblingTree.parent / 'work').resolve())
+    )
+    initGlb = {'injected': 'safe-global', 'outcome': outcome}
+    runArgs = (scrPath, ['first', 2], workDir, None, initGlb, 'synthetic_run')
+    if (outcome == 'return'):
+        result = MUT.RunFromPath(*runArgs)
+    else:
+        expected = {'exit': SystemExit, 'raise': RuntimeError}[outcome]
+        with pytest.raises(expected) as raised:
+            MUT.RunFromPath(*runArgs)
+    sibling = sys.modules['DynLoadSibling']
+    assert (sibling.__file__ == str(scrDir / 'DynLoadSibling/__init__.py'))
+    assert (sibling.seen == {
+        # Like `python <script>`, the script directory leads `sys.path`.
+        'path': [str(scrDir), *origPathEntries],
+        'argv': [str(scrDir / 'entry.py'), 'first', '2'],
+        'cwd': childCwd, 'name': 'synthetic_run', 'injected': 'safe-global',
+    })
+    # The original objects are restored without the script changes.
+    assert (sys.path is origPath)
+    assert (sys.path == origPathEntries)
+    assert (sys.argv is origArgv)
+    assert (sys.argv == origArgvEntries)
+    assert (os.getcwd() == cwd)
+    if (outcome == 'return'):
+        assert (result['result'] == 'returned')
+        assert (result['DynLoadSibling'] is sibling)
+    elif (outcome == 'exit'): assert (raised.value.code == 3)
+    else: assert (str(raised.value) == 'synthetic script failure')
+
+
+@pytest.mark.parametrize(('workDir', 'relative', 'error', 'match'), [
+    # A relative script is looked up beneath the missing `workDir` first.
+    ('missing', True, FileNotFoundError, 'Target script does not exist'),
+    ('missing', False, FileNotFoundError, "directory: 'missing'"),
+    ('app/entry.py', False, NotADirectoryError, 'Not a directory'),
+])
+def test_RunFromPath_RejectsInvalidWorkDirAndRestoresState(
+    monkeypatch: pytest.MonkeyPatch,
+    siblingTree: Path,
+    workDir: str,
+    relative: bool,
+    error: type,
+    match: str,
+) -> None:
+    monkeypatch.setattr(MUT, 'sys', sys)
+    monkeypatch.chdir(siblingTree.parent)
+    monkeypatch.delenv('UNIT_DYN_WORKDIR', raising=False)
+    (origPath, origPathEntries) = (sys.path, list(sys.path))
+    (origArgv, origArgvEntries) = (sys.argv, list(sys.argv))
+    cwd = os.getcwd()
+
+    scrPath = 'entry.py' if relative else (siblingTree / 'entry.py')
+
+    with pytest.raises(error, match=match):
+        MUT.RunFromPath(
+            scrPath, ['first'], workDir, {'UNIT_DYN_WORKDIR': 'set'},
+            {'injected': 'safe-global', 'outcome': 'return'},
+        )
+
+    # The script never ran and every scoped state change was undone.
+    assert ('DynLoadSibling' not in sys.modules)
+    assert ('UNIT_DYN_WORKDIR' not in os.environ)
+    assert (sys.path is origPath)
+    assert (sys.path == origPathEntries)
+    assert (sys.argv is origArgv)
+    assert (sys.argv == origArgvEntries)
+    assert (os.getcwd() == cwd)

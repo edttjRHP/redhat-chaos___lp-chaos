@@ -422,7 +422,7 @@ class TempEnv:
 
         # Restore Env. Variables that were unset and/or altered.
         for (key, origValue) in self.origEnv.items():
-            if (os.environ.get(key) != origValue):
+            if (os.getenv(key) != origValue):
                 os.environ[key] = origValue
 
         return False

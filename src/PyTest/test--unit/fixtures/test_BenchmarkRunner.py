@@ -174,7 +174,8 @@ def PatchModule(
         raise AssertionError('Initial config must use this test config script')
 
     (localPath, pathProbes, fileResults) = MakePathBinding()
-    localOS = SimpleNamespace(environ={})
+    localEnv = {}
+    localOS = SimpleNamespace(environ=localEnv, getenv=localEnv.get)
     localTempfile = SimpleNamespace()
     localSys = SimpleNamespace()
 
@@ -328,7 +329,7 @@ def test__DEF__FXT_CFG_UsesNestedWorkloadConfiguration(
     assert (brConfig.startVM is True)
     assert (brConfig.wlName == 'windows')
     assert (brConfig.wlKind == 'vm')
-    assert (brConfig.brEnv == {})
+    assert (brConfig.brEnv == {'WORKLOAD_CONFIG': "{'storage': '96'}"})
     assert (timeout.brExecOH == 30)
     assert (timeout.brExecVM == 5)
     assert (timeout.vmStart == '15m')

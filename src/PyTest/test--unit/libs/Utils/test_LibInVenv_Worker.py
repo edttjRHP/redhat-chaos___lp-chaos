@@ -24,8 +24,9 @@ def WorkerPaths(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, str]]:
         prefix='/unit/venv', base_prefix='/unit/base',
         path=['/parent/packages'],
     ))
+    workerEnv = {}
     monkeypatch.setattr(MUT, 'os', SimpleNamespace(
-        environ={}, pathsep=os.pathsep,
+        environ=workerEnv, getenv=workerEnv.get, pathsep=os.pathsep,
     ))
     for name in ('sysconfig', 'site', 'importlib', 'traceback'):
         monkeypatch.setattr(MUT, name, mock.Mock())

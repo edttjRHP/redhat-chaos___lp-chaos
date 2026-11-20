@@ -127,10 +127,11 @@ Put live CUT scenarios under `test--suites/` (examples are in `test--suites/ts--
 [fixtures](#choose-a-fixture). Use indirect parametrization for configuration and normal assertions for outcomes.
 
 Markers in the `ts--example/`:
-  - `vm`: [direct VM example](test--suites/ts--example/test_VM.py) creates a VM and asserts a guest PowerShell response.
-  - `vm__br`: [benchmark-runner examples](test--suites/ts--example/test_BenchmarkRunner.py) include two VM Ready checks and a skipped legacy guest
+  - `vm`: A [Direct VM example](test--suites/ts--example/test_VM.py) creates a VM and asserts a guest PowerShell response.
+  - `vm__br`: The [benchmark-runner examples](test--suites/ts--example/test_BenchmarkRunner.py) include two VM Ready checks and a skipped legacy guest
     SSH/file-transfer test.
-  - `krkn`: [Krkn examples](test--suites/ts--example/test_Krkn.py) are skipped launcher-Pod/host-observation placeholders.
+  - `krkn`: A [KrknHub `pod-scenario` example](test--suites/ts--example/test_Krkn.py) kills a Pod in a Deployment and asserts a new one is respawned
+    automatically.
 
 Inspect live-suite selection without executing fixture setup:
 ```bash

@@ -1,4 +1,6 @@
+import copy
 from dataclasses import FrozenInstanceError
+import json
 from types import SimpleNamespace
 from unittest import mock
 
@@ -240,3 +242,108 @@ def test__ResCreate_PreservesLifecycleException(
             'kind: Namespace', isSecret=False,
         )
         resourceCLI.EnsureRes.assert_not_called()
+
+
+def ResourceText(uid: str, terminating: bool = False) -> str:
+    deletion = '  deletionTimestamp: "2026-01-01T00:00:00Z"\n'
+    return (
+        f'kind: Pod\nmetadata:\n  uid: {uid}\n'
+        f'{deletion if terminating else ""}'
+    )
+
+
+@pytest.mark.parametrize('form', ['yaml', 'json', 'parsed'])
+def test_GetUIDs_ListSkipsTerminatingItems(form: str) -> None:
+    parsed = {
+        'kind': 'List',
+        'items': [
+            {'metadata': {'uid': 'live-one'}},
+            {
+                'metadata': {
+                    'uid': 'terminating-one',
+                    'deletionTimestamp': '2026-01-01T00:00:00Z',
+                },
+            },
+            # Only the exact key presence marks deletion, even when `null`.
+            {
+                'metadata': {
+                    'uid': 'terminating-null', 'deletionTimestamp': None,
+                },
+            },
+            {
+                'metadata': {
+                    'uid': 'live-two', 'deletionGracePeriodSeconds': 30,
+                },
+            },
+        ],
+    }
+    before = copy.deepcopy(parsed)
+    source = {
+        'yaml': yaml.safe_dump(parsed),
+        'json': json.dumps(parsed),
+        'parsed': parsed,
+    }[form]
+
+    assert (MUT.GetUIDs(source) == {'live-one', 'live-two'})
+    assert (parsed == before)
+
+
+@pytest.mark.parametrize(('source', 'expected'), [
+    (ResourceText('single-one'), {'single-one'}),
+    (ResourceText('single-one', terminating=True), set()),
+    (
+        'metadata:\n  uid: null-one\n  deletionTimestamp: null\n',
+        set(),
+    ),
+    ({'metadata': {'uid': 'parsed-one'}}, {'parsed-one'}),
+    ('kind: List\nitems: []\n', set()),
+    ({'items': []}, set()),
+    # Non-empty input whose items are all terminating (any key value).
+    (
+        {
+            'items': [
+                {'metadata': {'uid': 'gone', 'deletionTimestamp': 0}},
+                {'metadata': {'uid': 'going', 'deletionTimestamp': 'now'}},
+            ],
+        },
+        set(),
+    ),
+])
+def test_GetUIDs_HandlesSingleAndEmptyResources(
+    source: str | dict,
+    expected: set,
+) -> None:
+    result = MUT.GetUIDs(source)
+    assert (type(result) is set)
+    assert (result == expected)
+
+
+@pytest.mark.parametrize(('source', 'match'), [
+    ('', 'Expected a resource map, got `NoneType`.'),
+    ('plain text', 'Expected a resource map, got `str`.'),
+    ('- metadata:\n    uid: one\n', 'Expected a resource map, got `list`.'),
+    ([], 'Expected a resource map, got `list`.'),
+    ('items: null\n', 'Expected `.items` as a list, got `NoneType`.'),
+    ({'items': {}}, 'Expected `.items` as a list, got `dict`.'),
+])
+def test_GetUIDs_RejectsNonResourceInput(
+    source: str | list | dict,
+    match: str,
+) -> None:
+    with pytest.raises(TypeError) as caught:
+        MUT.GetUIDs(source)
+
+    assert (str(caught.value) == match)
+
+
+@pytest.mark.parametrize(('source', 'error'), [
+    ('items: [\n', yaml.YAMLError),
+    ('kind: Pod\n', KeyError),
+    ({'items': [{'metadata': {}}]}, KeyError),
+])
+def test_GetUIDs_PropagatesMalformedResourceErrors(
+    source: str | dict,
+    error: type,
+) -> None:
+    with pytest.raises(error):
+        MUT.GetUIDs(source)

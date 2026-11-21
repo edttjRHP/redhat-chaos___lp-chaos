@@ -29,9 +29,8 @@ def Create(
     :param oc:
         CLI Client for target OpenShift Cluster.
     :param resCfg:
-        See `ResCfg` for details.
-        Native mode input:
-            resCfg=ResCfg(
+        Native mode input (see `ResCfg` for details):
+            ResCfg(
                 meta=NamedDict(namespace='<ns>', name='<name>'),
                 spec=NamedDict(
                     type='Opaque',
@@ -56,8 +55,8 @@ def Create(
     try:
         _ValResCfg(
             resCfg,
-            {'namespace', 'name'},
-            {'type', 'data', 'stringData'},
+            ({'namespace'}, {'name'}),
+            ({'type', 'data', 'stringData'}, set()),
             'Secret'
         )
     except yaml.YAMLError:

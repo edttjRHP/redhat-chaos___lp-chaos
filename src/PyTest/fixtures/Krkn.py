@@ -53,7 +53,7 @@ _DEF__FXT_CFG = NamedDict(
                     f'{Path(__file__).resolve().parent.parent}/'
                     'vendor/krkn'
                 ),
-            )),
+            )).resolve(),
             krknHub=Path(os.getenv(
                 (
                     'IENG_PYTEST____FXT__KRKN____'
@@ -63,7 +63,7 @@ _DEF__FXT_CFG = NamedDict(
                     f'{Path(__file__).resolve().parent.parent}/'
                     'vendor/krknHub'
                 ),
-            )),
+            )).resolve(),
         ),
         krknCfg=NamedDict(
             krknEnv={
@@ -386,6 +386,13 @@ def FxtKrkn(
                     `IENG_PYTEST____FXT__KRKN____DEF_FXT_CFG__ROOTPATH_KRKNHUB`
                     Env. Var. value (default:
                     `'<PyTestRoot>/vendor/krknHub'`)).
+                NOTE:
+                  - A rel. path as value of the above Env. Var. will be
+                    resolved against CWD during construction of
+                    `_DEF__FXT_CFG`.
+                  - If overridden (via, i.e. `@pytest.mark.parametrize` or any
+                    function call that allow overiding) with rel. path, it will
+                    be resolved against CWD at the time it is used.
               - krknCfg:
                 Krkn configurations.
                   - krknEnv:    Initial seed of Env. Var.

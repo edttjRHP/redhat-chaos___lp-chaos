@@ -22,9 +22,8 @@ def Create(
     :param oc:
         CLI Client for target OpenShift Cluster.
     :param resCfg:
-        See `ResCfg` for details.
-        Native mode input:
-            resCfg=ResCfg(
+        Native mode input (see `ResCfg` for details):
+            ResCfg(
                 meta=NamedDict(namespace='<ns>', name='<name>'),
                 spec=NamedDict(image='<image>'),
             )
@@ -40,7 +39,9 @@ def Create(
     :raises RuntimeError:
         Deployment creation failed.
     '''
-    _ValResCfg(resCfg, {'namespace', 'name'}, {'image'}, 'Deployment')
+    _ValResCfg(
+        resCfg, ({'namespace'}, {'name'}), (set(), {'image'}), 'Deployment',
+    )
     if ((resYAML := resCfg.yaml) is None):
         ns = resCfg.meta.get('namespace')
         resInput = {

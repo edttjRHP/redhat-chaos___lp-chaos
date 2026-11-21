@@ -22,8 +22,8 @@ typeset e=
 typeset instPath=
 typeset srcURL='https://github.com/krkn-chaos'
 typeset -A instRootArr=(
-    [krkn]="${IENG_PYTEST____FXT__KRKN____DEF_FXT_CFG__ROOTPATH_KRKN:-vendor/krkn}"
-    [krkn-hub]="${IENG_PYTEST____FXT__KRKN____DEF_FXT_CFG__ROOTPATH_KRKNHUB:-vendor/krknHub}"
+    [krkn]="${IENG_PYTEST____FXT__KRKN____DEF_FXT_CFG__ROOTPATH_KRKN:-${_scrPath}/vendor/krkn}"
+    [krkn-hub]="${IENG_PYTEST____FXT__KRKN____DEF_FXT_CFG__ROOTPATH_KRKNHUB:-${_scrPath}/vendor/krknHub}"
 )
 
 # The `fxtKrkn` renders KrknHub templates with GNU `envsubst`. Only command
@@ -45,9 +45,16 @@ for e in "${!instRootArr[@]}"; do
         typeset tmpDir=
         trap 'rm -rf -- "${tmpDir}"' EXIT
         tmpDir="$(mktemp -d -- "${instPath}.tmp.XXXXXX")"
-        curl -fsSL "${srcURL}/${e}/archive/refs/heads/main.tar.gz" |
-        tar -xzf - --strip-components=1 -C "${tmpDir}/"
+        {
+
+            curl -fsSL "${srcURL}/${e}/archive/refs/heads/main.tar.gz" |
+            tar -xzf - --strip-components=1 -C "${tmpDir}/"
+        }
         mv -T -- "${tmpDir}" "${instPath}"
+        {
+            [ -r "${instPath}/requirements.txt" ] &&
+            pip install -U -r "${instPath}/requirements.txt"
+        }
     true )
 done
 

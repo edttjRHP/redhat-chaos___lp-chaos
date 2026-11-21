@@ -36,26 +36,88 @@ def test_OwnInf_RequiresSharedMutableListAndFreezesBindings() -> None:
     with pytest.raises(FrozenInstanceError): info.owned = []
 
 
-@pytest.mark.parametrize('meta,spec', [
-    ({'name': 'one'}, {}),
-    ({}, {'data': {}}),
+# Native (optional, mandatory) key sets used by the `_ValResCfg` tests.
+vldMeta = ({'namespace'}, {'name'})
+vldSpec = ({'type'}, {'data'})
+
+
+@pytest.mark.parametrize('meta,spec,vld', [
+    # Mandatory keys only.
+    ({'name': 'one'}, {'data': {}}, (vldMeta, vldSpec)),
+    # Mandatory and optional keys.
+    (
+        {'name': 'one', 'namespace': 'ns'}, {'data': {}, 'type': 'Opaque'},
+        (vldMeta, vldSpec),
+    ),
+    # Presence only: `None` and empty values count as present.
+    ({'name': None}, {'data': ''}, (vldMeta, vldSpec)),
+    # Optional keys only, nothing mandatory.
+    ({'namespace': 'ns'}, {}, (({'namespace'}, set()), ({'type'}, set()))),
+    # Nothing supplied and nothing mandatory.
+    ({}, {}, ((set(), set()), (set(), set()))),
 ])
 def test__ValResCfg_AcceptsAllowedNativeKeys(
     meta: dict[str, object],
     spec: dict[str, object],
+    vld: tuple,
 ) -> None:
     cfg = MUT.ResCfg(meta=meta, spec=spec)
-    assert (MUT._ValResCfg(cfg, {'name'}, {'data'}, 'Secret') is None)
+    assert (MUT._ValResCfg(cfg, *vld, 'Secret') is None)
 
 
-@pytest.mark.parametrize('field', ['meta', 'spec'])
-def test__ValResCfg_RejectsUnsupportedNativeKeys(field: str) -> None:
-    cfgValues = {'meta': {}, 'spec': {}}
-    cfgValues[field] = {'unsupported': True}
-    cfg = MUT.ResCfg(**cfgValues)
+# Each input has exactly one violation.
+@pytest.mark.parametrize('meta,spec,message', [
+    ({}, {'data': {}}, "Missing mandatory `resCfg.meta` keys: {'name'}"),
+    ({'name': 'one'}, {}, "Missing mandatory `resCfg.spec` keys: {'data'}"),
+    (
+        {'name': 'one', 'unsupported': True}, {'data': {}},
+        "Unsupported `resCfg.meta` keys found: {'unsupported'}",
+    ),
+    (
+        {'name': 'one'}, {'data': {}, 'unsupported': True},
+        "Unsupported `resCfg.spec` keys found: {'unsupported'}",
+    ),
+])
+def test__ValResCfg_RejectsInvalidNativeKeys(
+    meta: dict[str, object],
+    spec: dict[str, object],
+    message: str,
+) -> None:
+    cfg = MUT.ResCfg(meta=meta, spec=spec)
 
-    with pytest.raises(ValueError, match='Unsupported'):
-        MUT._ValResCfg(cfg, {'name'}, {'data'}, 'Secret')
+    with pytest.raises(ValueError) as caught:
+        MUT._ValResCfg(cfg, vldMeta, vldSpec, 'Secret')
+
+    assert (str(caught.value) == message)
+
+
+# Each input has several violations.
+@pytest.mark.parametrize('meta,spec', [
+    ({'name': 'one', 'unsupported': True}, {}),
+    ({}, {'data': {}, 'unsupported': True}),
+    ({}, {}),
+    ({'name': 'one', 'bad': 1}, {'data': {}, 'worse': 2}),
+])
+def test__ValResCfg_RejectsMultipleInvalidNativeKeys(
+    meta: dict[str, object],
+    spec: dict[str, object],
+) -> None:
+    cfg = MUT.ResCfg(meta=meta, spec=spec)
+
+    with pytest.raises(ValueError):
+        MUT._ValResCfg(cfg, vldMeta, vldSpec, 'Secret')
+
+
+def test__ValResCfg_LeavesKeySetsUnchanged() -> None:
+    (meta, spec) = (({'namespace'}, {'name'}), ({'type'}, {'data'}))
+    before = copy.deepcopy((meta, spec))
+    valid = MUT.ResCfg(meta={'name': 'one'}, spec={'data': {}})
+    invalid = MUT.ResCfg(meta={'bad': 1}, spec={'worse': 2})
+
+    assert (MUT._ValResCfg(valid, meta, spec, 'Secret') is None)
+    with pytest.raises(ValueError):
+        MUT._ValResCfg(invalid, meta, spec, 'Secret')
+    assert ((meta, spec) == before)
 
 
 def test__ValResCfg_YAMLIgnoresInvalidNativeAndChecksOnlyKind(
@@ -64,9 +126,10 @@ def test__ValResCfg_YAMLIgnoresInvalidNativeAndChecksOnlyKind(
     text = 'kind: Secret\n'
     parser = mock.Mock(return_value={'kind': 'Secret'})
     monkeypatch.setattr(MUT, 'yaml', SimpleNamespace(safe_load=parser))
+    # Authoritative YAML bypasses even missing mandatory native keys.
     cfg = MUT.ResCfg(meta=None, spec=object(), yaml=text)
 
-    assert (MUT._ValResCfg(cfg, set(), set(), 'Secret') is None)
+    assert (MUT._ValResCfg(cfg, vldMeta, vldSpec, 'Secret') is None)
     parser.assert_called_once_with(text)
 
 
@@ -89,7 +152,7 @@ def test__ValResCfg_RejectsInvalidAuthoritativeYAML(
     cfg = MUT.ResCfg(meta=None, spec=None, yaml=text)
 
     with pytest.raises(error):
-        MUT._ValResCfg(cfg, set(), set(), 'Secret')
+        MUT._ValResCfg(cfg, (set(), set()), (set(), set()), 'Secret')
     parser.assert_called_once_with(text)
 
 

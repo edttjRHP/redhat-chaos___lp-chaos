@@ -33,7 +33,9 @@ def test_Create_ForwardsNativeOrAuthoritativeYAML(
     monkeypatch.setattr(MUT, '_ResCreate', create)
 
     assert (MUT.Create(resourceCLI, cfg, ownInf) is resource)
-    validate.assert_called_once_with(cfg, {'name'}, set(), 'Namespace')
+    validate.assert_called_once_with(
+        cfg, (set(), {'name'}), (set(), set()), 'Namespace',
+    )
     create.assert_called_once_with(resourceCLI, producer, ownInf)
     resourceCLI.NewRes.assert_not_called()
     resourceCLI.EnsureRes.assert_not_called()
@@ -61,7 +63,9 @@ def test_Create_PropagatesValidationFailureBeforeCreation(
         MUT.Create(resourceCLI, cfg)
 
     assert (caught.value is failure)
-    validate.assert_called_once_with(cfg, {'name'}, set(), 'Namespace')
+    validate.assert_called_once_with(
+        cfg, (set(), {'name'}), (set(), set()), 'Namespace',
+    )
     create.assert_not_called()
     resourceCLI.NewRes.assert_not_called()
     resourceCLI.EnsureRes.assert_not_called()
@@ -87,5 +91,23 @@ def test_Create_PropagatesCreationFailure(
     create.assert_called_once_with(
         resourceCLI, {'subCmd': 'namespace', 'args': ['native-one']}, None,
     )
+    resourceCLI.NewRes.assert_not_called()
+    resourceCLI.EnsureRes.assert_not_called()
+
+
+def test_Create_RejectsMissingNameBeforeCreation(
+    resourceCLI: mock.MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    create = mock.Mock()
+    monkeypatch.setattr(MUT, '_ResCreate', create)
+
+    with pytest.raises(ValueError) as caught:
+        MUT.Create(resourceCLI, MUT.ResCfg())
+
+    assert (str(caught.value) == (
+        "Missing mandatory `resCfg.meta` keys: {'name'}"
+    ))
+    create.assert_not_called()
     resourceCLI.NewRes.assert_not_called()
     resourceCLI.EnsureRes.assert_not_called()

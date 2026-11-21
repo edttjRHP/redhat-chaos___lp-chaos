@@ -7,8 +7,9 @@ from libs.CustomTypes import NamedDict
 import libs.OpenShift.OCP.Resources.Deployment as MUT
 
 
-vldMeta = {'namespace', 'name'}
-vldSpec = {'image'}
+# Native (optional, mandatory) key sets of `Deployment.Create`.
+vldMeta = ({'namespace'}, {'name'})
+vldSpec = (set(), {'image'})
 
 
 @pytest.mark.parametrize('tracked', [False, True])
@@ -85,7 +86,18 @@ def test_Create_ForwardsAuthoritativeYAML(
             meta=NamedDict(name='web'),
             spec=NamedDict(image='registry/img', replicas=2),
         ),
-        r"Unsupported `resCfg\.\w+` keys found: \{'replicas'\}",
+        r"Unsupported `resCfg\.spec` keys found: \{'replicas'\}",
+    ),
+    (
+        MUT.ResCfg(
+            meta=NamedDict(namespace='apps'),
+            spec=NamedDict(image='registry/img'),
+        ),
+        r"Missing mandatory `resCfg\.meta` keys: \{'name'\}",
+    ),
+    (
+        MUT.ResCfg(meta=NamedDict(name='web'), spec=NamedDict()),
+        r"Missing mandatory `resCfg\.spec` keys: \{'image'\}",
     ),
     (
         MUT.ResCfg(yaml='kind: Secret\nmetadata:\n  name: web\n'),

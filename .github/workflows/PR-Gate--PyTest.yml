@@ -3,26 +3,48 @@
 # Set up the framework with `setup.sh`, then run the isolated unit and the
 #   offline contract suites with their explicit configurations. Never run the
 #   live `test--suites/` (selected by the default `pytest.ini`).
-# Enforcement: require the `PyTest PR Gate` check in branch protection or a
-#   ruleset. Being path filtered, it stays Pending on PRs not touching `paths`.
+# Every PR runs:
+#     - `Tree Update Check`:
+#       Lists the PR files via the GitHub REST API (`dorny/paths-filter`).
+#     - `PyTest PR Gate`:
+#       Runs, and must pass, only if the PR changes any file under
+#       `src/PyTest/`, otherwise it is skipped.
+# Enforcement:
+#   Require BOTH the `Tree Update Check` and `PyTest PR Gate` checks in branch
+#   protection or a ruleset.
 name: PyTest CI
 
 on:
   pull_request:
-    paths:
-      - 'src/PyTest/**'
-      - '.github/workflows/pytest--pr-gate.yml'
 
 permissions:
   contents: read
 
 concurrency:
-  group: pytest-pr--${{ github.event.pull_request.number }}
+  group: PR--PyTest--${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  PyTest:
+  TreeUpd:
+    name: Tree Update Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      PyTest: ${{ steps.filter.outputs.PyTest }}
+    steps:
+      - name: Detect changes under `src/PyTest/`.
+        id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
+        with:
+          filters: |
+            PyTest:
+              - 'src/PyTest/**'
+  Test--PyTest:
     name: PyTest PR Gate
+    needs: TreeUpd
+    if: needs.TreeUpd.outputs.PyTest == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:

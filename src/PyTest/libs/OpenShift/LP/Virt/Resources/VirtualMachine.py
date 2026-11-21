@@ -15,7 +15,9 @@ def Create(
     Create or reuse a VirtualMachine from an authoritative YAML manifest.
 
     :param oc:          CLI client for the target OpenShift cluster.
-    :param resCfg:      Resource configuration with `yaml` set.
+    :param resCfg:
+        Authorative mode input (see `ResCfg` for details):
+            ResCfg(yaml=<authResManifest>)
     :param ownInf:      Optional ownership records for newly created VMs.
     :param optsNewRes:  Creation options, including wait condition and timeout.
 
@@ -26,5 +28,5 @@ def Create(
     '''
     if (resCfg.yaml is None):
         raise ValueError('VirtualMachine creation requires YAML.')
-    _ValResCfg(resCfg, set(), set(), 'VirtualMachine')
+    _ValResCfg(resCfg, (set(), set()), (set(), set()), 'VirtualMachine')
     return _ResCreate(oc, resCfg.yaml, ownInf, optsNewRes=optsNewRes)

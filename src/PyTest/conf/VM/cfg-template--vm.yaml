@@ -1,5 +1,5 @@
 {#-
-# Windows VM template; see docs/guide--vm.md for custom templates and defaults.
+# Windows VM template; see docs/guide--VM.md for custom templates and defaults.
 # fxtVM supplies the image source, guest key, VM name, and namespace.
 # Required caller context (camelCase):
 #   - vmDataVolumeSource:

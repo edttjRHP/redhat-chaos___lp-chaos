@@ -2,7 +2,7 @@
 
 Current examples demonstrate direct VM guest communication and benchmark-runner VM readiness. The legacy BR guest example and both KrknHub examples remain
 skipped. Provisioning, Ready, and guest login do not establish that a Windows bugcheck was injected, detected, or diagnosed. See
-[current examples](../README.md#test-locations-and-examples).
+[current examples](../README.md#test-locations).
 
 
 ## Planned Work
@@ -16,5 +16,5 @@ skipped. Provisioning, Ready, and guest login do not establish that a Windows bu
 These are proposals, not supported guarantees. No current example implements vCPU stalls, time skew, resource contention, network faults, or Windows crash
 detection, or maps faults to guaranteed stop codes.
 
-Use the [Krkn guide](guide--krkn.md) for current chaos configuration and the [VM](guide--vm.md) or [benchmark-runner](guide--benchmark-runner.md) guide for
+Use the [Krkn guide](guide--Krkn.md) for current chaos configuration and the [VM](guide--VM.md) or [benchmark-runner](guide--BenchmarkRunner.md) guide for
 provisioning and guest requirements.

@@ -31,7 +31,9 @@ def test_Create_ForwardsYAMLAndOptions(
 
     assert (result is resource)
     assert (options == original)
-    valResCfg.assert_called_once_with(resCfg, set(), set(), 'VirtualMachine')
+    valResCfg.assert_called_once_with(
+        resCfg, (set(), set()), (set(), set()), 'VirtualMachine',
+    )
     resCreate.assert_called_once_with(oc, manifest, ownInf, optsNewRes=options)
     assert (resCreate.call_args.kwargs['optsNewRes'] is options)
 
@@ -63,7 +65,9 @@ def test_Create_PropagatesValidationFailure() -> None:
             MUT.Create(mock.sentinel.oc, resCfg)
 
     assert (caught.value is validationError)
-    valResCfg.assert_called_once_with(resCfg, set(), set(), 'VirtualMachine')
+    valResCfg.assert_called_once_with(
+        resCfg, (set(), set()), (set(), set()), 'VirtualMachine',
+    )
     resCreate.assert_not_called()
 
 
@@ -83,7 +87,9 @@ def test_Create_PropagatesCreationFailure() -> None:
             MUT.Create(oc, resCfg, ownInf, options)
 
     assert (caught.value is creationError)
-    valResCfg.assert_called_once_with(resCfg, set(), set(), 'VirtualMachine')
+    valResCfg.assert_called_once_with(
+        resCfg, (set(), set()), (set(), set()), 'VirtualMachine',
+    )
     resCreate.assert_called_once_with(
         oc, resCfg.yaml, ownInf, optsNewRes=options,
     )

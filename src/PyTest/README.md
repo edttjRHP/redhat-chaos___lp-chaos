@@ -1,33 +1,28 @@
-# PyTest Framework
-
-Use these fixtures to provision VMs, communicate with their guests, and inject chaos into a Cluster Under Test (CUT).
-
-## Choose a Fixture
-
-| Fixture       | Purpose                                                                                       | Lifetime      |
-|---------------|-----------------------------------------------------------------------------------------------|---------------|
-| `fxtVM`       | Create VMs from a supplied or bundled YAML/Jinja template, with guest communication support.  | Per test      |
-| `fxtVMbyBR`   | Deploy VM workloads at scale through benchmark-runner's separate worker process.              | Per module    |
-| `fxtKrkn`     | Inject chaos into the CUT by running a Krkn Hub scenario.                                     | Per test      |
-
-Both VM fixtures return `vmList` and `vmCreate(...)` for additional batches. Setup waits for provisioning and, by default, VM startup/Ready; it is not a
-fire-and-forget background API. `vm.ssh` connects lazily when first used and supports guest commands, PowerShell, and file transfer. Ready does not prove guest
-communication or authorization.
-
-The `fxtVM` can create multiple VMs, but prefer benchmark-runner for scale-oriented workloads rather than the direct fixture's sequential VM operations. This
-is usage guidance, not a measured performance guarantee.
-
-
+# PyTest Test Suite Framework
 ## Prerequisites
 
-- Use Python 3.11 and authenticated `oc`/`virtctl` access to a disposable CUT with OpenShift Virtualization.
-- Supply usable guest images, compatible storage, and any image-source credentials; repository values are examples.
-- For guest communication, provide OpenSSH tools and a guest SSH service/user authorized for the selected key. The bundled Windows template requires its
-  Cloudbase-Init guest setup. Custom images/templates need equivalent setup.
-- Install benchmark-runner in its configured vendor virtual environment, or Krkn and Krkn Hub at their configured paths, only when using those integrations.
-  Krkn rendering also requires GNU `envsubst` and Bash.
-- Align CLI context and runner kubeconfig with the same CUT. `kCfg` defaults to `KUBECONFIG` or `~/.kube/config`; shared CLI factories use their configured CLI
-  context.
+  - Use Python 3.11 and authenticated `oc` access to a disposable Cluster Under Test (CUT).
+  - Align CLI context and runner kubeconfig with the same CUT. `kCfg` defaults to `KUBECONFIG` or `~/.kube/config`; shared CLI factories use their configured
+    CLI context.
+  - Read the `## Prerequisites` sections of all fixture guides (`docs/guide--*.md`):
+      - [`guide--VM.md`](docs/guide--VM.md#prerequisites)
+      - [`guide--Krkn.md`](docs/guide--Krkn.md#prerequisites)
+      - [`guide--BenchmarkRunner.md`](docs/guide--BenchmarkRunner.md#prerequisites)
+
+
+## Setup
+
+Run setup from `src/PyTest/` in the Python environment you intend to use:
+```bash
+./setup.sh    # Production Install (excludes `requirements--unit.txt`).
+./setup.sh 1  # Development Install (includes `requirements--unit.txt`).
+```
+
+Production Install:
+  - Developing Test Suites for product test.
+  - Running the Test Suites in CI for product test.
+Development Install:
+  - Developing this PyTest Test Suite Framework itself.
 
 
 ## Configure and Write a Test
@@ -57,26 +52,19 @@ def test_GuestCommand(fxtVM: FxtObjVM) -> None:
     assert result.success
 ```
 
-Configure image and credentials first. See [direct VMs and custom templates](docs/guide--vm.md), [benchmark-runner](docs/guide--benchmark-runner.md), and
-[Krkn Hub](docs/guide--krkn.md).
+Configure image and credentials first. See [direct VMs and custom templates](docs/guide--VM.md), [benchmark-runner](docs/guide--BenchmarkRunner.md), and
+[Krkn Hub](docs/guide--Krkn.md).
 
 
 ## Best Practices
 
-- **Namespace isolation is a recommendation, not automatic.** Prefer a dedicated namespace per test for `fxtVM` and standalone `fxtKrkn` scenarios. Prefer a
-  dedicated namespace per module for module-scoped `fxtVMbyBR`, whose VMs remain available to that module's tests until teardown. Separate concurrent runs and
-  parameter groups as needed.
-- Share a module namespace only when tests intentionally share VMs and their mutations. Avoid having a function-scoped fixture create a namespace containing
-  module-scoped or caller-owned resources: deleting that namespace removes its contents. Pre-create shared namespaces and manage their lifetime outside the
-  shorter-lived fixture.
-- The `fxtVM` reuses an existing generated name in the same namespace only with `reuseExisting=True`; reused VMs are not owned or deleted by that fixture.
-  Supply valid existing credentials and restore any test changes yourself. The `fxtVMbyBR` does not offer this reuse option and rejects collisions with its
-  generated VM names.
-- VM teardown closes guest connections and attempts deletion only for VMs still matching their recorded ownership. The `fxtVM` also removes namespaces/Secrets
-  it created; pre-existing ones remain. BR cleanup covers its tracked VMs, not every workload artifact or namespace. Krkn scenario cleanup is the scenario
-  author's responsibility.
-- Assert guest access explicitly when needed. Neither a Ready condition nor possession of an SSH key grants guest authorization. Review disruptive scenarios
-  and retained artifacts before use; keep credentials out of source/logs.
+  - **Namespace isolation.** A fixture should fully owns the namespace it creates, so it can tear it down at the end of its lifetime (hence safely and
+    completely cleanup all created test resources). NOTE: Do not place resources need to be retained, after fixture lifetime, inside a fixture-owned namespace.
+  - Review the logs to ensure no credentials leaked.
+  - Read the `## Best Practices` sections of all fixture guides (`docs/guide--*.md`):
+      - [`guide--VM.md`](docs/guide--VM.md#best-practices)
+      - [`guide--Krkn.md`](docs/guide--Krkn.md#best-practices)
+      - [`guide--BenchmarkRunner.md`](docs/guide--BenchmarkRunner.md#best-practices)
 
 
 ## NamedDict Merge API Reference
@@ -128,8 +116,8 @@ Put live CUT scenarios under `test--suites/` (examples are in `test--suites/ts--
 
 Markers in the `ts--example/`:
   - `vm`: A [Direct VM example](test--suites/ts--example/test_VM.py) creates a VM and asserts a guest PowerShell response.
-  - `vm__br`: The [benchmark-runner examples](test--suites/ts--example/test_BenchmarkRunner.py) include two VM Ready checks and a skipped legacy guest
-    SSH/file-transfer test.
+  - `vm__br`: The [benchmark-runner examples](test--suites/ts--example/test_BenchmarkRunner.py) include two VM Ready checks and a skipped legacy guest SSH /
+    file-transfer test.
   - `krkn`: A [KrknHub `pod-scenario` example](test--suites/ts--example/test_Krkn.py) kills a Pod in a Deployment and asserts a new one is respawned
     automatically.
 
@@ -142,3 +130,21 @@ python -m pytest -c pytest.ini test--suites/ -m krkn --collect-only
 ```
 
 Only remove `--collect-only` on an authorized, disposable CUT after reviewing the selected tests' creation, disruption, guest-access, and cleanup requirements.
+
+
+#### Choose a Fixture
+
+Use these fixtures to provision VMs, communicate with their guests, and inject chaos into a Cluster Under Test (CUT).
+
+| Fixture       | Purpose                                                                                       | Lifetime      |
+|---------------|-----------------------------------------------------------------------------------------------|---------------|
+| `fxtVM`       | Create VMs from a supplied or bundled YAML/Jinja template, with guest communication support.  | Per module    |
+| `fxtVMbyBR`   | Deploy VM workloads at scale through benchmark-runner's separate worker process.              | Per module    |
+| `fxtKrkn`     | Inject chaos into the CUT by running a Krkn Hub scenario.                                     | Per test      |
+
+Both VM fixtures return `vmList` and `vmCreate(...)` for additional batches. Setup waits for provisioning and, by default, VM startup/Ready; it is not a
+fire-and-forget background API. `vm.ssh` connects lazily when first used and supports guest commands, PowerShell, and file transfer. Ready does not prove guest
+communication or authorization.
+
+The `fxtVM` can create multiple VMs, but prefer benchmark-runner for scale-oriented workloads rather than the direct fixture's sequential VM operations. This
+is usage guidance, not a measured performance guarantee.

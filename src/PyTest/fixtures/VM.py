@@ -498,7 +498,7 @@ def _RetainNS(oc: OCcli, resRef: str) -> bool:
     return True
 
 
-@pytest.fixture(name='fxtVM', scope='function')
+@pytest.fixture(name='fxtVM', scope='module')
 def FxtVM(
     request: Any,
     fxtOCcli: Callable[..., Any],
@@ -507,7 +507,7 @@ def FxtVM(
     '''
     Create initial VMs and expose their shared factory and aggregate list.
 
-    VMs live for one test. Startup waits for it to be Ready, not guaranteeing
+    VMs live for one module. Startup waits for it to be Ready, not guaranteeing
     SSH connection to the Guest OS. The used VM Image Template and VM Template
     provide guest authorization. Reused VMs may still be started but are not
     owned.
@@ -520,7 +520,7 @@ def FxtVM(
     `vmCreate(...)` returns only its batch and appends it to `vmList`.
 
     This is the complete Fixture Configuration reference (see
-    `docs/guide--vm.md` for concise usage and custom YAML templates).
+    `docs/guide--VM.md` for concise usage and custom YAML templates).
     Configure via indirect parametrize with `dict`:
         @pytest.mark.parametrize(
             'fxtVM,',

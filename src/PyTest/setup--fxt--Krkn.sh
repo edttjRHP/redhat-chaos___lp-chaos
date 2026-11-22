@@ -18,37 +18,55 @@ typeset _scrName="${BASH_SOURCE[0]##*/}"
 typeset _scrPath="$(p="${BASH_SOURCE[0]}"; [ "${p:0:1}" = / ] || p="./${p}"; CDPATH= \command cd -L -- "${p%/*}/" 2> /dev/null;\command pwd -L)"
 set -euxo pipefail; shopt -s inherit_errexit
 
+typeset -i mode="${1:-1}"; (($#)) && shift
+
 typeset e=
 typeset instPath=
 typeset srcURL='https://github.com/krkn-chaos'
+typeset -i doInst=1
 typeset -A instRootArr=(
-    [krkn]="${IENG_PYTEST____FXT__KRKN____DEF_FXT_CFG__ROOTPATH_KRKN:-vendor/krkn}"
-    [krkn-hub]="${IENG_PYTEST____FXT__KRKN____DEF_FXT_CFG__ROOTPATH_KRKNHUB:-vendor/krknHub}"
+    [krkn]="${IENG_PYTEST____FXT__KRKN____DEF_FXT_CFG__ROOTPATH_KRKN:-${_scrPath}/vendor/krkn}"
+    [krkn-hub]="${IENG_PYTEST____FXT__KRKN____DEF_FXT_CFG__ROOTPATH_KRKNHUB:-${_scrPath}/vendor/krknHub}"
 )
+
+case ${mode} in (-1|0|1);; (*)false;; esac
 
 # The `fxtKrkn` renders KrknHub templates with GNU `envsubst`. Only command
 #   presence is checked here, before any download.
 command -v envsubst 1> /dev/null || {
     echo 'The `envsubst` not found on `PATH`; install GNU `envsubst` as per '\
-'`docs/guide--krkn.md`.' 1>&2
+'`docs/guide--Krkn.md`.' 1>&2
     exit 1
 }
 
 for e in "${!instRootArr[@]}"; do
     instPath="${instRootArr[${e}]%/}"
     [ "${instPath::1}" = / ] || instPath="${_scrPath}/${instPath}"
-    { [ -e "${instPath}" ] && [ -d "${instPath}" ]; } && continue
+    { [ -e "${instPath}" ] && [ -d "${instPath}" ]; } && {
+        case ${mode} in
+          (-1)  continue;;
+          (0)   doInst=0;;
+          (1)   rm -rf "${instPath}/";;
+        esac
+    }
     mkdir -p -- "${instPath%/*}"
-    # Extract into a sibling temp. dir., then rename it into place, so a failed
-    #   download or extraction never leaves a partial install behind.
-    (
+    ((doInst)) && (
+        # Extract into a temp. dir., then rename it into place, so a failed
+        #   download or extraction never leaves a partial install behind.
         typeset tmpDir=
         trap 'rm -rf -- "${tmpDir}"' EXIT
         tmpDir="$(mktemp -d -- "${instPath}.tmp.XXXXXX")"
-        curl -fsSL "${srcURL}/${e}/archive/refs/heads/main.tar.gz" |
-        tar -xzf - --strip-components=1 -C "${tmpDir}/"
+        {
+
+            curl -fsSL "${srcURL}/${e}/archive/refs/heads/main.tar.gz" |
+            tar -xzf - --strip-components=1 -C "${tmpDir}/"
+        }
         mv -T -- "${tmpDir}" "${instPath}"
     true )
+    {
+        [ -r "${instPath}/requirements.txt" ] &&
+        pip install -U -r "${instPath}/requirements.txt"
+    }
 done
 
 true

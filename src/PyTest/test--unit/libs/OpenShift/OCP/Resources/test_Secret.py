@@ -6,7 +6,8 @@ from unittest import mock
 import pytest
 import yaml
 
-from libs.OpenShift.OCP.Resources import SpecMismatch
+from libs.CustomTypes import NamedDict
+from libs.OpenShift.OCP.Resources import SpecMismatch, _ValResCfg
 import libs.OpenShift.OCP.Resources.Secret as MUT
 
 
@@ -104,7 +105,8 @@ def test_Create_InitialParserFailureIsPrivate(
     assert ('dummy-private-yaml' not in (str(caught.value) + caplog.text))
     assert ('[private' not in (str(caught.value) + caplog.text))
     secretContext.validate.assert_called_once_with(
-        cfg, {'namespace', 'name'}, {'type', 'data', 'stringData'}, 'Secret',
+        cfg, ({'namespace'}, {'name'}),
+        ({'type', 'data', 'stringData'}, set()), 'Secret',
     )
     secretContext.create.assert_not_called()
     secretContext.parser.assert_not_called()
@@ -140,7 +142,8 @@ def test_Create_InvalidDesiredBase64IsSanitized(
     assert caught.value.__suppress_context__
     secretContext.decode.assert_called_once_with(data, validate=True)
     secretContext.validate.assert_called_once_with(
-        cfg, {'namespace', 'name'}, {'type', 'data', 'stringData'}, 'Secret',
+        cfg, ({'namespace'}, {'name'}),
+        ({'type', 'data', 'stringData'}, set()), 'Secret',
     )
     secretContext.create.assert_not_called()
     secretContext.temporaryDirectory.assert_not_called()
@@ -177,7 +180,8 @@ def test_Create_ValidDesiredBase64ReturnsMockedResource(
 
     assert (MUT.Create(secretContext.cli, cfg) is resource)
     secretContext.validate.assert_called_once_with(
-        cfg, {'namespace', 'name'}, {'type', 'data', 'stringData'}, 'Secret',
+        cfg, ({'namespace'}, {'name'}),
+        ({'type', 'data', 'stringData'}, set()), 'Secret',
     )
     assert (secretContext.decode.call_args_list == [
         mock.call(data, validate=True), mock.call(data),
@@ -270,7 +274,8 @@ def test_Create_NativeBinaryUTF8UsesPrivateFileInputs(
 
     assert (MUT.Create(secretContext.cli, cfg, ownInf) is resource)
     secretContext.validate.assert_called_once_with(
-        cfg, {'namespace', 'name'}, {'type', 'data', 'stringData'}, 'Secret',
+        cfg, ({'namespace'}, {'name'}),
+        ({'type', 'data', 'stringData'}, set()), 'Secret',
     )
     secretContext.parser.assert_not_called()
     assert (secretContext.decode.call_args_list == [
@@ -383,7 +388,8 @@ def test_Create_AuthoritativeYAMLUsesParsedSpecAndRawInput(
 
     assert (MUT.Create(secretContext.cli, cfg, ownInf) is resource)
     secretContext.validate.assert_called_once_with(
-        cfg, {'namespace', 'name'}, {'type', 'data', 'stringData'}, 'Secret',
+        cfg, ({'namespace'}, {'name'}),
+        ({'type', 'data', 'stringData'}, set()), 'Secret',
     )
     secretContext.parser.assert_called_once_with(text)
     assert (secretContext.decode.call_args_list == [
@@ -429,7 +435,8 @@ def test_Create_PreparationFailureIsSanitized(
         secretContext.decode.assert_called_once_with('a', validate=True)
     else: secretContext.decode.assert_not_called()
     secretContext.validate.assert_called_once_with(
-        cfg, {'namespace', 'name'}, {'type', 'data', 'stringData'}, 'Secret',
+        cfg, ({'namespace'}, {'name'}),
+        ({'type', 'data', 'stringData'}, set()), 'Secret',
     )
     secretContext.create.assert_not_called()
     secretContext.parser.assert_not_called()
@@ -613,7 +620,8 @@ def test_Create_ValidationFailurePrecedesPrivateFiles(
 
     assert (caught.value is failure)
     secretContext.validate.assert_called_once_with(
-        cfg, {'namespace', 'name'}, {'type', 'data', 'stringData'}, 'Secret',
+        cfg, ({'namespace'}, {'name'}),
+        ({'type', 'data', 'stringData'}, set()), 'Secret',
     )
     secretContext.create.assert_not_called()
     secretContext.parser.assert_not_called()
@@ -622,3 +630,27 @@ def test_Create_ValidationFailurePrecedesPrivateFiles(
     secretContext.stringIO.assert_not_called()
     secretContext.csvWriter.assert_not_called()
     secretContext.os.open.assert_not_called()
+
+
+def test_Create_RejectsMissingNameBeforePrivateFiles(
+    secretContext: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The real validator: `name` is mandatory, `namespace`/`spec` optional.
+    monkeypatch.setattr(MUT, '_ValResCfg', _ValResCfg)
+    cfg = MUT.ResCfg(
+        meta=NamedDict(namespace='apps'),
+        spec=NamedDict(stringData={'key': 'private-value'}),
+    )
+
+    with pytest.raises(ValueError) as caught:
+        MUT.Create(secretContext.cli, cfg)
+
+    assert (str(caught.value) == (
+        "Missing mandatory `resCfg.meta` keys: {'name'}"
+    ))
+    secretContext.create.assert_not_called()
+    secretContext.temporaryDirectory.assert_not_called()
+    secretContext.os.open.assert_not_called()
+    secretContext.cli.NewRes.assert_not_called()
+    secretContext.cli.EnsureRes.assert_not_called()

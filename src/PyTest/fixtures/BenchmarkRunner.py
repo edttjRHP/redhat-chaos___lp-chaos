@@ -47,7 +47,7 @@ _DEF__FXT_CFG = NamedDict(
                     f'{Path(__file__).resolve().parent.parent}/'
                     'vendor/BenchmarkRunner'
                 ),
-            )),
+            )).resolve(),
         ),
         brCfg=NamedDict(
             count=1,
@@ -311,7 +311,7 @@ def FxtVMbyBR(
     appends to `vmList`.
 
     This is the complete Fixture Configuration reference (see
-    `docs/guide--benchmark-runner.md` for concise usage).
+    `docs/guide--BenchmarkRunner.md` for concise usage).
     Configure via indirect parametrize with `dict`:
         @pytest.mark.parametrize(
             'fxtVMbyBR,',
@@ -333,7 +333,18 @@ def FxtVMbyBR(
             Fixture settings:
               - rootPath:
                 Root dir. of vEnv libraries:
-                  - br: Location where `benchmark-runner` is installed.
+                  - br: Location where `benchmark-runner` is installed
+                    (default:
+                    'IENG_PYTEST____FXT__BENCHMARKRUNNER____DEF_FXT_CFG__ROOTPATH_BR'
+                    Env. Var. value (default:
+                    `'<PyTestRoot>/vendor/BenchmarkRunner'`)).
+                NOTE:
+                  - A rel. path as value of the above Env. Var. will be
+                    resolved against CWD during construction of
+                    `_DEF__FXT_CFG`.
+                  - If overridden (via, i.e. `@pytest.mark.parametrize` or any
+                    function call that allow overiding) with rel. path, it will
+                    be resolved against CWD at the time it is used.
               - brCfg:
                 BenchmarkRunner workload configurations:
                   - count:      Number of VMs to create (default: `1`).

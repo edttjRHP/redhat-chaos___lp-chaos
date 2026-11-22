@@ -1,0 +1,68 @@
+# Pull Request verification gate for the PyTest framework (`src/PyTest/`).
+#
+# Set up with `setup.sh 1` (Development Install), then run the isolated unit
+#   and offline contract suites with their explicit configurations. Never run
+#   the live `test--suites/` (selected by the default `pytest.ini`).
+# Every PR runs:
+#     - `Tree Update Check`:
+#       Lists the PR files via the GitHub REST API (`dorny/paths-filter`).
+#     - `PyTest PR Gate`:
+#       Runs, and must pass, if the PR changes `src/PyTest/` or this
+#       workflow file; otherwise it is skipped.
+# Enforcement:
+#   Require BOTH the `Tree Update Check` and `PyTest PR Gate` checks in branch
+#   protection or a ruleset.
+name: PyTest CI
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: PR--PyTest--${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  TreeUpd:
+    name: Tree Update Check
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      PyTest: ${{ steps.filter.outputs.PyTest }}
+    steps:
+      - name: Detect changes to PyTest or this workflow.
+        id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
+        with:
+          filters: |
+            PyTest:
+              - '.github/workflows/PR-Gate--PyTest.yml'
+              - 'src/PyTest/**'
+  Test--PyTest:
+    name: PyTest PR Gate
+    needs: TreeUpd
+    if: needs.TreeUpd.outputs.PyTest == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: src/PyTest
+    steps:
+      - name: Check out PR merge commit.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+      - name: Set up PyTest Test Suite Framework as Dev. Install.
+        run: ./setup.sh 1
+      - name: Run unit tests.
+        run: python -m pytest -c pytest--unit.ini test--unit/
+      - name: Run contract tests.
+        run: python -m pytest -c pytest--contract.ini test--contract/

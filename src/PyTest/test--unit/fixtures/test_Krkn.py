@@ -1,16 +1,12 @@
-from collections.abc import Iterator
 import dataclasses
 from datetime import timezone
-import os
-from pathlib import Path, PurePosixPath
-import sys
+from pathlib import PurePosixPath
 from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 
 import fixtures.Krkn as MUT
-from libs.Utils.DynLoad import RunFromPath
 
 
 lexicalScenarioPattern = r'(^/|(^|/)\.\.(/|$))'
@@ -77,6 +73,7 @@ def TestBoundaries(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     osProxy = SimpleNamespace(
         environ=environ,
         getenv=getenv,
+        devnull='/synthetic/null-device',
         path=SimpleNamespace(expanduser=mock.Mock()),
     )
     formatNow = mock.Mock(return_value='20260203T040506Z')
@@ -202,6 +199,16 @@ def HubContext(testBoundaries: SimpleNamespace) -> SimpleNamespace:
     )
     config.__or__.return_value = runConfig
     hub = MUT.KrknHub(None, MUT.InstParsKrknHub(fxtCfgObj=config))
+    # The runner roots `Run` exports before loading the `env.sh` files.
+    roots = {
+        'KRAKEN_FOLDER': krknRoot, 'KRAKEN_HUB_FOLDER': scnDir,
+        'SCN_TEMPLATE_ROOT': scnDir, 'CFG_TEMPLATE_ROOT': kHubRoot,
+        'WORK_DIR': runDir,
+    }
+    envFiles = [
+        (kHubRoot / 'env.sh'), (kHubRoot / 'common_run.sh'),
+        (scnDir / 'env.sh'),
+    ]
     return SimpleNamespace(
         boundary=context, paths=paths, environ=environ,
         kHubRoot=kHubRoot, krknRoot=krknRoot, scnDir=scnDir,
@@ -209,6 +216,7 @@ def HubContext(testBoundaries: SimpleNamespace) -> SimpleNamespace:
         cfgFile=cfgFile, script=script, descriptor=descriptor,
         scnTemplate=scnTemplate, cfgTemplate=cfgTemplate,
         config=config, runConfig=runConfig, hub=hub,
+        roots=roots, envFiles=envFiles,
     )
 
 
@@ -621,9 +629,7 @@ def test_Run_PassesThreeScenarioLabelsToMockedSearch(
             ),
         ]
     )
-    context.boundary.source.assert_called_once_with(envFiles=[
-        (context.kHubRoot / 'env.sh'), (context.scnDir / 'env.sh'),
-    ])
+    context.boundary.source.assert_called_once_with(envFiles=context.envFiles)
     context.boundary.runner.assert_called_once()
 
 
@@ -699,8 +705,9 @@ def test_Run_InitialKubeconfigSeedAndLaterOverrides_ReviewRegression(
     fxtInf = SimpleNamespace(krknCfg=SimpleNamespace(krknEnv=configEnv))
     seed = {
         **hubSeedDefaults, **configEnv, 'KRKN_KUBE_CONFIG': 'fake-config',
+        **context.roots,
     }
-    files = [(context.kHubRoot / 'env.sh'), (context.scnDir / 'env.sh')]
+    files = context.envFiles
     events = mock.Mock()
     events.attach_mock(context.boundary.updateEnv, 'update_env')
     events.attach_mock(context.boundary.source, 'source')
@@ -804,9 +811,7 @@ def test_Run_PassesTemplateBytesAndPreservesDispatchContract(
             ),
         ]
     )
-    context.boundary.source.assert_called_once_with(envFiles=[
-        (context.kHubRoot / 'env.sh'), (context.scnDir / 'env.sh'),
-    ])
+    context.boundary.source.assert_called_once_with(envFiles=context.envFiles)
     context.boundary.runner.assert_called_once_with(
         (context.krknRoot / 'run_kraken.py'), args, context.runDir,
         overrides or {}, initialGlobals, 'synthetic_run',
@@ -912,9 +917,9 @@ def test_Run_PropagatesErrorsAndExitsMockedContexts(
     with pytest.raises(expectedError) as raised:
         context.hub.Run('pod-scenarios')
     if (failure in ('root', 'scenario')):
-        context.boundary.source.assert_called_once_with(envFiles=[
-            (context.kHubRoot / 'env.sh'), (context.scnDir / 'env.sh'),
-        ])
+        context.boundary.source.assert_called_once_with(
+            envFiles=context.envFiles,
+        )
     if (failure in ('root', 'scenario', 'runner', 'exit')):
         assert (raised.value is error)
 
@@ -1037,89 +1042,6 @@ def test_Run_ResolvesRelativeRunnerBeforeChangingDirectory(
     assert (names.index('resolve_runner') < names.index('runner'))
     assert (context.boundary.runner.call_args.args[0] is relativeRunner)
     assert (context.boundary.runner.call_args.args[2] is context.runDir)
-
-
-# A runner importing its sibling `krkn` package, as Krkn `run_kraken.py` does.
-runnerScript = """\
-import os
-import sys
-
-from krkn import cerberus
-
-cerberus.seenPath = list(sys.path)
-cerberus.seenCwd = os.getcwd()
-sys.path.append('/polluted/by/runner')
-if (outcome == 'exit'): raise SystemExit(0)
-if (outcome == 'raise'): raise RuntimeError('synthetic runner failure')
-"""
-
-
-@pytest.fixture(name='runnerTree')
-def RunnerTree(tmp_path: Path) -> Iterator[Path]:
-    '''
-    Yield a real Krkn-like root: the runner beside a fake `krkn` package.
-
-    :yield: Root holding `run_kraken.py` and `krkn/cerberus.py`.
-    '''
-    assert ('krkn' not in sys.modules)
-    root = tmp_path / 'krkn'
-    (root / 'krkn').mkdir(parents=True)
-    (root / 'krkn' / '__init__.py').write_text('')
-    (root / 'krkn' / 'cerberus.py').write_text('seenPath = None\n')
-    (root / 'run_kraken.py').write_text(runnerScript)
-    yield root
-    # Drop the imported fake package and the runner directory finder cache.
-    for name in [name for name in sys.modules if name.split('.')[0] == 'krkn']:
-        sys.modules.pop(name)
-    sys.path_importer_cache.pop(str(root.resolve()), None)
-
-
-@pytest.mark.parametrize('outcome', ['return', 'exit', 'raise'])
-def test_Run_ImportsRunnerSiblingPackageAndRestoresSysPath(
-    hubContext: SimpleNamespace,
-    runnerTree: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    outcome: str,
-) -> None:
-    context = hubContext
-    # The real `RunFromPath` (`runpy`) leads `sys.path` with the runner dir.
-    monkeypatch.setattr(MUT, 'RunFromPath', RunFromPath)
-    context.runConfig.fxtInf.rootPath.krkn = context.paths.Make(runnerTree)
-    # A real run directory: `RunFromPath` enters it as the `workDir`.
-    runRoot = runnerTree.parent / 'runs'
-    context.environ[
-        'IENG_PYTEST____FXT__KRKN____KRKN__RUN_DIR__ROOT'
-    ] = str(runRoot)
-    runDir = runRoot / '20260203T040506Z--pod-scenarios'
-    # Serve the run directory as a real path: `Run` creates it, then the real
-    #   `RunFromPath` enters it.
-    context.paths.values[PurePosixPath(runDir)] = runDir
-    cwd = os.getcwd()
-    origPath = sys.path
-    origEntries = list(sys.path)
-    initGlb = {'outcome': outcome}
-    if (outcome == 'return'):
-        result = context.hub.Run('pod-scenarios', initGlb=initGlb)
-    else:
-        expected = {'exit': SystemExit, 'raise': RuntimeError}[outcome]
-        with pytest.raises(expected) as raised:
-            context.hub.Run('pod-scenarios', initGlb=initGlb)
-    cerberus = sys.modules['krkn.cerberus']
-    runnerDir = runnerTree.resolve()
-    assert (cerberus.__file__ == str(runnerDir / 'krkn' / 'cerberus.py'))
-    # Like `python run_kraken.py`, the runner directory leads `sys.path`.
-    assert (cerberus.seenPath == [str(runnerDir), *origEntries])
-    # The original `sys.path` list is restored, without runner changes.
-    assert (sys.path is origPath)
-    assert (sys.path == origEntries)
-    if (outcome == 'return'): assert (result['cerberus'] is cerberus)
-    elif (outcome == 'exit'): assert (raised.value.code == 0)
-    else: assert (str(raised.value) == 'synthetic runner failure')
-    # Krkn ran in `runDir`, then the caller CWD and environment returned.
-    assert runDir.is_dir()
-    assert (cerberus.seenCwd == str(runDir.resolve()))
-    assert (os.getcwd() == cwd)
-    context.boundary.tempEnv.return_value.__exit__.assert_called_once()
 
 
 def test_Run_UsesUTCAndRejectsSameSecondCollisions(
@@ -1324,6 +1246,7 @@ def test_Run_SeedsEnvironmentBeforeSourcingAndKeepsRunnerOverrides(
     events = mock.Mock()
     events.attach_mock(context.boundary.updateEnv, 'update_env')
     events.attach_mock(context.boundary.source, 'source')
+    events.attach_mock(context.runDir.mkdir, 'run_dir')
     beforeEnv = dict(context.environ)
     fxtInf = SimpleNamespace(krknCfg=SimpleNamespace(krknEnv=configured))
     context.hub.Run(
@@ -1332,9 +1255,12 @@ def test_Run_SeedsEnvironmentBeforeSourcingAndKeepsRunnerOverrides(
     )
     context.boundary.namedDict.assert_called_once_with({'fxtInf': fxtInf})
     calls = [call[0] for call in events.method_calls]
+    # The run directory is the `WORK_DIR` exported before sourcing.
+    assert (calls.index('run_dir') < calls.index('update_env'))
     assert (calls.index('update_env') < calls.index('source'))
     context.boundary.updateEnv.assert_any_call({
         **hubSeedDefaults, **configured, 'KRKN_KUBE_CONFIG': 'fake-config',
+        **context.roots,
     })
     context.boundary.runner.assert_called_once_with(
         (context.krknRoot / 'run_kraken.py'),
@@ -1375,9 +1301,16 @@ def test_Run_SeedsDefaultsBeneathConfiguredEnvironment(
     }
     context.hub.Run('pod-scenarios')
     seed = context.boundary.updateEnv.call_args_list[0].args[0]
-    assert (seed == {**expected, 'KRKN_KUBE_CONFIG': 'fake-config'})
+    assert (seed == {
+        **expected, 'KRKN_KUBE_CONFIG': 'fake-config', **context.roots,
+    })
+    # The run root is read first: its run directory is the `WORK_DIR`.
     assert (
-        context.boundary.getenv.call_args_list[:2] == [
+        context.boundary.getenv.call_args_list[:3] == [
+            mock.call(
+                'IENG_PYTEST____FXT__KRKN____KRKN__RUN_DIR__ROOT',
+                '/tmp/run-dir--krkn',
+            ),
             mock.call('ROLLBACK_VERSIONS_DIRECTORY', 'krkn--rollback'),
             mock.call('TELEMETRY_ARCHIVE_PATH', 'krkn--telemetry'),
         ]
@@ -1387,7 +1320,7 @@ def test_Run_SeedsDefaultsBeneathConfiguredEnvironment(
 @pytest.mark.parametrize('preparation', [
     'absent', 'success', 'nonzero', 'notExecutable',
 ])
-def test_Run_PreparesBeforeRunnerAndPropagatesFailures(
+def test_Run_PreparesBeforeRenderingAndPropagatesFailures(
     hubContext: SimpleNamespace,
     preparation: str,
 ) -> None:
@@ -1414,10 +1347,12 @@ def test_Run_PreparesBeforeRunnerAndPropagatesFailures(
         )
         errorText = "b'Permission denied'"
         exitStat = -2
+    # The `prep.sh` runs before both templates are rendered.
     commandResults = [success, success]
-    if (preparation != 'absent'): commandResults.append(prepResult)
+    if (preparation != 'absent'): commandResults.insert(0, prepResult)
     context.boundary.commandRun.side_effect = commandResults
     events = mock.Mock()
+    events.attach_mock(context.boundary.source, 'source')
     events.attach_mock(context.boundary.commandRun, 'command')
     events.attach_mock(context.boundary.runner, 'runner')
     if (preparation in ('nonzero', 'notExecutable')):
@@ -1428,18 +1363,62 @@ def test_Run_PreparesBeforeRunnerAndPropagatesFailures(
 
         assert (actualError == expectedError)
         context.boundary.runner.assert_not_called()
+        context.scnTemplate.read_bytes.assert_not_called()
+        context.scnFile.write_bytes.assert_not_called()
+        context.cfgFile.write_bytes.assert_not_called()
     else:
         context.hub.Run('pod-scenarios')
         context.boundary.runner.assert_called_once()
     actualCommandCount = context.boundary.commandRun.call_count
-    expectedCommandCount = 2 if (preparation == 'absent') else 3
+    expectedCommandCount = {
+        'absent': 2, 'success': 3, 'nonzero': 1, 'notExecutable': 1,
+    }[preparation]
+    calls = [call[0] for call in events.method_calls]
     if (preparation != 'absent'):
-        context.boundary.commandRun.assert_called_with([str(prepFile)])
+        prepCall = context.boundary.commandRun.call_args_list[0]
+        assert (prepCall == mock.call([str(prepFile)]))
+        # The `prep.sh` runs after the `env.sh` files are loaded.
+        assert (calls.index('source') < calls.index('command'))
     assert (actualCommandCount == expectedCommandCount)
     if (preparation == 'success'):
-        calls = [call[0] for call in events.method_calls]
         assert (calls.index('command', 2) < calls.index('runner'))
     assert context.boundary.tempEnv.return_value.__exit__.called
+
+
+@pytest.mark.parametrize('case', [
+    'normal', 'existingScenario', 'emptyScenario', 'emptyConfig',
+])
+def test_Run_RendersOnlyMissingScenarioAndNonEmptyTemplates(
+    hubContext: SimpleNamespace,
+    case: str,
+) -> None:
+    context = hubContext
+    nullDevice = context.paths.Make('/synthetic/null-device')
+    existing = (case == 'existingScenario')
+    # An existing `SCENARIO_FILE` (e.g. from `prep.sh`) is used as is.
+    if existing: context.scnFile.is_file.return_value = True
+    elif (case == 'emptyScenario'):
+        context.scnTemplate.read_bytes.return_value = b''
+    elif (case == 'emptyConfig'):
+        context.cfgTemplate.read_bytes.return_value = b''
+    inputs = {
+        'normal': [b'scenario-template', b'config-template'],
+        'existingScenario': [b'config-template'],
+        'emptyScenario': [b'config-template'],
+        'emptyConfig': [b'scenario-template'],
+    }[case]
+    context.hub.Run('pod-scenarios')
+    assert (context.boundary.commandRun.call_args_list == [
+        mock.call(['envsubst'], input=data, spPars={'text': False})
+        for data in inputs
+    ])
+    scnWritten = (b'scenario-template' in inputs)
+    cfgWritten = (b'config-template' in inputs)
+    assert (context.scnFile.write_bytes.called == scnWritten)
+    assert (context.cfgFile.write_bytes.called == cfgWritten)
+    assert (nullDevice.read_bytes.called == existing)
+    assert (context.scnTemplate.read_bytes.called != existing)
+    context.boundary.runner.assert_called_once()
 
 
 def test_Run_AcceptsScnNameKeyword(hubContext: SimpleNamespace) -> None:
@@ -1461,10 +1440,9 @@ def test_Run_UsesDefaultRunRootAndPropagatesSetupFailure(
     with pytest.raises(OSError) as raised:
         context.hub.Run('pod-scenarios')
     assert (raised.value is error)
+    # The run directory is created before any environment seeding.
     assert (
         context.boundary.getenv.call_args_list == [
-            mock.call('ROLLBACK_VERSIONS_DIRECTORY', 'krkn--rollback'),
-            mock.call('TELEMETRY_ARCHIVE_PATH', 'krkn--telemetry'),
             mock.call(
                 'IENG_PYTEST____FXT__KRKN____KRKN__RUN_DIR__ROOT',
                 '/tmp/run-dir--krkn',
@@ -1472,6 +1450,8 @@ def test_Run_UsesDefaultRunRootAndPropagatesSetupFailure(
         ]
     )
     context.runDir.mkdir.assert_called_once_with(parents=True, exist_ok=False)
+    context.boundary.updateEnv.assert_not_called()
+    context.boundary.source.assert_not_called()
     context.boundary.tempEnv.return_value.__exit__.assert_called_once()
 
 

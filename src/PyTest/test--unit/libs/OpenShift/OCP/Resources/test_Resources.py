@@ -36,26 +36,88 @@ def test_OwnInf_RequiresSharedMutableListAndFreezesBindings() -> None:
     with pytest.raises(FrozenInstanceError): info.owned = []
 
 
-@pytest.mark.parametrize('meta,spec', [
-    ({'name': 'one'}, {}),
-    ({}, {'data': {}}),
+# Native (optional, mandatory) key sets used by the `_ValResCfg` tests.
+vldMeta = ({'namespace'}, {'name'})
+vldSpec = ({'type'}, {'data'})
+
+
+@pytest.mark.parametrize('meta,spec,vld', [
+    # Mandatory keys only.
+    ({'name': 'one'}, {'data': {}}, (vldMeta, vldSpec)),
+    # Mandatory and optional keys.
+    (
+        {'name': 'one', 'namespace': 'ns'}, {'data': {}, 'type': 'Opaque'},
+        (vldMeta, vldSpec),
+    ),
+    # Presence only: `None` and empty values count as present.
+    ({'name': None}, {'data': ''}, (vldMeta, vldSpec)),
+    # Optional keys only, nothing mandatory.
+    ({'namespace': 'ns'}, {}, (({'namespace'}, set()), ({'type'}, set()))),
+    # Nothing supplied and nothing mandatory.
+    ({}, {}, ((set(), set()), (set(), set()))),
 ])
 def test__ValResCfg_AcceptsAllowedNativeKeys(
     meta: dict[str, object],
     spec: dict[str, object],
+    vld: tuple,
 ) -> None:
     cfg = MUT.ResCfg(meta=meta, spec=spec)
-    assert (MUT._ValResCfg(cfg, {'name'}, {'data'}, 'Secret') is None)
+    assert (MUT._ValResCfg(cfg, *vld, 'Secret') is None)
 
 
-@pytest.mark.parametrize('field', ['meta', 'spec'])
-def test__ValResCfg_RejectsUnsupportedNativeKeys(field: str) -> None:
-    cfgValues = {'meta': {}, 'spec': {}}
-    cfgValues[field] = {'unsupported': True}
-    cfg = MUT.ResCfg(**cfgValues)
+# Each input has exactly one violation.
+@pytest.mark.parametrize('meta,spec,message', [
+    ({}, {'data': {}}, "Missing mandatory `resCfg.meta` keys: {'name'}"),
+    ({'name': 'one'}, {}, "Missing mandatory `resCfg.spec` keys: {'data'}"),
+    (
+        {'name': 'one', 'unsupported': True}, {'data': {}},
+        "Unsupported `resCfg.meta` keys found: {'unsupported'}",
+    ),
+    (
+        {'name': 'one'}, {'data': {}, 'unsupported': True},
+        "Unsupported `resCfg.spec` keys found: {'unsupported'}",
+    ),
+])
+def test__ValResCfg_RejectsInvalidNativeKeys(
+    meta: dict[str, object],
+    spec: dict[str, object],
+    message: str,
+) -> None:
+    cfg = MUT.ResCfg(meta=meta, spec=spec)
 
-    with pytest.raises(ValueError, match='Unsupported'):
-        MUT._ValResCfg(cfg, {'name'}, {'data'}, 'Secret')
+    with pytest.raises(ValueError) as caught:
+        MUT._ValResCfg(cfg, vldMeta, vldSpec, 'Secret')
+
+    assert (str(caught.value) == message)
+
+
+# Each input has several violations.
+@pytest.mark.parametrize('meta,spec', [
+    ({'name': 'one', 'unsupported': True}, {}),
+    ({}, {'data': {}, 'unsupported': True}),
+    ({}, {}),
+    ({'name': 'one', 'bad': 1}, {'data': {}, 'worse': 2}),
+])
+def test__ValResCfg_RejectsMultipleInvalidNativeKeys(
+    meta: dict[str, object],
+    spec: dict[str, object],
+) -> None:
+    cfg = MUT.ResCfg(meta=meta, spec=spec)
+
+    with pytest.raises(ValueError):
+        MUT._ValResCfg(cfg, vldMeta, vldSpec, 'Secret')
+
+
+def test__ValResCfg_LeavesKeySetsUnchanged() -> None:
+    (meta, spec) = (({'namespace'}, {'name'}), ({'type'}, {'data'}))
+    before = copy.deepcopy((meta, spec))
+    valid = MUT.ResCfg(meta={'name': 'one'}, spec={'data': {}})
+    invalid = MUT.ResCfg(meta={'bad': 1}, spec={'worse': 2})
+
+    assert (MUT._ValResCfg(valid, meta, spec, 'Secret') is None)
+    with pytest.raises(ValueError):
+        MUT._ValResCfg(invalid, meta, spec, 'Secret')
+    assert ((meta, spec) == before)
 
 
 def test__ValResCfg_YAMLIgnoresInvalidNativeAndChecksOnlyKind(
@@ -64,9 +126,10 @@ def test__ValResCfg_YAMLIgnoresInvalidNativeAndChecksOnlyKind(
     text = 'kind: Secret\n'
     parser = mock.Mock(return_value={'kind': 'Secret'})
     monkeypatch.setattr(MUT, 'yaml', SimpleNamespace(safe_load=parser))
+    # Authoritative YAML bypasses even missing mandatory native keys.
     cfg = MUT.ResCfg(meta=None, spec=object(), yaml=text)
 
-    assert (MUT._ValResCfg(cfg, set(), set(), 'Secret') is None)
+    assert (MUT._ValResCfg(cfg, vldMeta, vldSpec, 'Secret') is None)
     parser.assert_called_once_with(text)
 
 
@@ -89,7 +152,7 @@ def test__ValResCfg_RejectsInvalidAuthoritativeYAML(
     cfg = MUT.ResCfg(meta=None, spec=None, yaml=text)
 
     with pytest.raises(error):
-        MUT._ValResCfg(cfg, set(), set(), 'Secret')
+        MUT._ValResCfg(cfg, (set(), set()), (set(), set()), 'Secret')
     parser.assert_called_once_with(text)
 
 
@@ -244,16 +307,11 @@ def test__ResCreate_PreservesLifecycleException(
         resourceCLI.EnsureRes.assert_not_called()
 
 
-def ResourceText(uid: str, terminating: bool = False) -> str:
-    deletion = '  deletionTimestamp: "2026-01-01T00:00:00Z"\n'
-    return (
-        f'kind: Pod\nmetadata:\n  uid: {uid}\n'
-        f'{deletion if terminating else ""}'
-    )
-
-
 @pytest.mark.parametrize('form', ['yaml', 'json', 'parsed'])
-def test_GetUIDs_ListSkipsTerminatingItems(form: str) -> None:
+def test_GetUIDs_ListSkipsTerminatingItems(
+    monkeypatch: pytest.MonkeyPatch,
+    form: str,
+) -> None:
     parsed = {
         'kind': 'List',
         'items': [
@@ -264,12 +322,8 @@ def test_GetUIDs_ListSkipsTerminatingItems(form: str) -> None:
                     'deletionTimestamp': '2026-01-01T00:00:00Z',
                 },
             },
-            # Only the exact key presence marks deletion, even when `null`.
-            {
-                'metadata': {
-                    'uid': 'terminating-null', 'deletionTimestamp': None,
-                },
-            },
+            # An explicit `null` timestamp does not mark deletion.
+            {'metadata': {'uid': 'live-null', 'deletionTimestamp': None}},
             {
                 'metadata': {
                     'uid': 'live-two', 'deletionGracePeriodSeconds': 30,
@@ -283,39 +337,64 @@ def test_GetUIDs_ListSkipsTerminatingItems(form: str) -> None:
         'json': json.dumps(parsed),
         'parsed': parsed,
     }[form]
+    parser = mock.Mock(return_value=parsed)
+    monkeypatch.setattr(MUT, 'yaml', SimpleNamespace(safe_load=parser))
 
-    assert (MUT.GetUIDs(source) == {'live-one', 'live-two'})
+    assert (MUT.GetUIDs(source) == {'live-one', 'live-null', 'live-two'})
     assert (parsed == before)
+    if (form == 'parsed'): parser.assert_not_called()
+    else: parser.assert_called_once_with(source)
 
 
-@pytest.mark.parametrize(('source', 'expected'), [
-    (ResourceText('single-one'), {'single-one'}),
-    (ResourceText('single-one', terminating=True), set()),
+@pytest.mark.parametrize('form', ['yaml', 'json', 'parsed'])
+@pytest.mark.parametrize(('parsed', 'expected'), [
+    ({'kind': 'Pod', 'metadata': {'uid': 'single-one'}}, {'single-one'}),
     (
-        'metadata:\n  uid: null-one\n  deletionTimestamp: null\n',
+        {'metadata': {'uid': 'null-one', 'deletionTimestamp': None}},
+        {'null-one'},
+    ),
+    (
+        {
+            'metadata': {
+                'uid': 'terminating-one',
+                'deletionTimestamp': '2026-01-01T00:00:00Z',
+            },
+        },
         set(),
     ),
-    ({'metadata': {'uid': 'parsed-one'}}, {'parsed-one'}),
-    ('kind: List\nitems: []\n', set()),
-    ({'items': []}, set()),
-    # Non-empty input whose items are all terminating (any key value).
+    ({'kind': 'List', 'items': []}, set()),
+    # Non-empty input whose items are all terminating (any non-null value).
     (
         {
             'items': [
                 {'metadata': {'uid': 'gone', 'deletionTimestamp': 0}},
                 {'metadata': {'uid': 'going', 'deletionTimestamp': 'now'}},
+                {'metadata': {'uid': 'blank', 'deletionTimestamp': ''}},
+                {'metadata': {'uid': 'false', 'deletionTimestamp': False}},
             ],
         },
         set(),
     ),
 ])
 def test_GetUIDs_HandlesSingleAndEmptyResources(
-    source: str | dict,
+    monkeypatch: pytest.MonkeyPatch,
+    parsed: dict,
     expected: set,
+    form: str,
 ) -> None:
+    source = {
+        'yaml': yaml.safe_dump(parsed),
+        'json': json.dumps(parsed),
+        'parsed': parsed,
+    }[form]
+    parser = mock.Mock(return_value=parsed)
+    monkeypatch.setattr(MUT, 'yaml', SimpleNamespace(safe_load=parser))
+
     result = MUT.GetUIDs(source)
     assert (type(result) is set)
     assert (result == expected)
+    if (form == 'parsed'): parser.assert_not_called()
+    else: parser.assert_called_once_with(source)
 
 
 @pytest.mark.parametrize(('source', 'match'), [

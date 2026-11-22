@@ -86,39 +86,61 @@ def GetUIDs(yamlRes: Union[str, dict[str, Any]]) -> set[str]:
         raise TypeError(
             f'Expected `.items` as a list, got `{type(items).__name__}`.'
         )
+    # Cover cases where Key `deletionTimestamp` is absent or explicitly set to
+    #   a `null` value. A defensive approach to exclude resource being deleted.
     return {
         item['metadata']['uid']
         for item in items
-        if ('deletionTimestamp' not in item['metadata'])
+        if (item['metadata'].get('deletionTimestamp') is None)
     }
 
 
 def _ValResCfg(
     resCfg: ResCfg,
-    vldMeta: set,
-    vldSpec: set,
+    vldMeta: tuple[set[str], set[str]],
+    vldSpec: tuple[set[str], set[str]],
     expKind: str,
 ) -> None:
     '''
     Check native key allowlists or authoritative YAML kind, not a full schema.
 
-    :param resCfg:      Resource configuration to check.
-    :param vldMeta:     A `set` of valid keys in `ResCfg.meta`.
-    :param vldSpec:     A `set` of valid keys in `ResCfg.spec`.
-    :param expKind:     Expected YAML Manifest `kind`.
+    Native keys are checked for presence only: a key whose value is `None` or
+    empty is present, and values are not validated.
+
+    When the Authoritative YAML is given in `resCfg`, the native `meta` and
+    `spec` are ignored.
+
+    :param resCfg:  Resource configuration to check.
+    :param vldMeta:
+        A (optional, mandatory) `tuple` of key `set`s for native `ResCfg.meta`.
+    :param vldSpec:
+        A (optional, mandatory) `tuple` of key `set`s for native `ResCfg.spec`.
+    :param expKind: Expected YAML Manifest `kind`.
 
     :raises ValueError: Invalid `resCfg` input.
     '''
     if ((resYAML := resCfg.yaml) is None):
-        invMeta = set(resCfg.meta) - vldMeta
-        if (invMeta):
+        ((optMeta, mandMeta), (optSpec, mandSpec)) = (vldMeta, vldSpec)
+        (metaKeys, specKeys) = (set(resCfg.meta), set(resCfg.spec))
+        missMeta = mandMeta - metaKeys
+        if (missMeta):
             raise ValueError(
-                f'Unsupported `resCfg.meta` keys found: {invMeta}'
+                f'Missing mandatory `resCfg.meta` keys: {missMeta}'
             )
-        invSpec = set(resCfg.spec) - vldSpec
-        if (invSpec):
+        invldMeta = metaKeys - (optMeta | mandMeta)
+        if (invldMeta):
             raise ValueError(
-                f'Unsupported `resCfg.meta` keys found: {invSpec}'
+                f'Unsupported `resCfg.meta` keys found: {invldMeta}'
+            )
+        missSpec = mandSpec - specKeys
+        if (missSpec):
+            raise ValueError(
+                f'Missing mandatory `resCfg.spec` keys: {missSpec}'
+            )
+        invldSpec = specKeys - (optSpec | mandSpec)
+        if (invldSpec):
+            raise ValueError(
+                f'Unsupported `resCfg.spec` keys found: {invldSpec}'
             )
     else:
         if ((actKind := yaml.safe_load(resYAML)['kind']) != expKind):

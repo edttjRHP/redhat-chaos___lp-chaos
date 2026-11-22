@@ -3,7 +3,14 @@
 #
 # Download the public `main` branch archives (no authentication) and extract
 #   them into the Fixture install paths. Relative paths are resolved from this
-#   script directory. An existing path is kept untouched (never overwritten).
+#   script directory.
+#
+# Arg.:
+#   MODE    Policy if existing installation exist.
+#           Supported values:
+#            -1 Skip it (default).
+#             0 Keep the existing installation and re-install its dependencies.
+#             1 Force a clean install.
 #
 # Env. Var.:
 #   IENG_PYTEST____FXT__KRKN____DEF_FXT_CFG__ROOTPATH_KRKN
@@ -18,12 +25,10 @@ typeset _scrName="${BASH_SOURCE[0]##*/}"
 typeset _scrPath="$(p="${BASH_SOURCE[0]}"; [ "${p:0:1}" = / ] || p="./${p}"; CDPATH= \command cd -L -- "${p%/*}/" 2> /dev/null;\command pwd -L)"
 set -euxo pipefail; shopt -s inherit_errexit
 
-typeset -i mode="${1:-1}"; (($#)) && shift
+typeset -i mode="${1:--1}"; (($#)) && shift
 
-typeset e=
-typeset instPath=
-typeset srcURL='https://github.com/krkn-chaos'
-typeset -i doInst=1
+typeset e= instPath= srcURL='https://github.com/krkn-chaos'
+typeset -i doInst=0
 typeset -A instRootArr=(
     [krkn]="${IENG_PYTEST____FXT__KRKN____DEF_FXT_CFG__ROOTPATH_KRKN:-${_scrPath}/vendor/krkn}"
     [krkn-hub]="${IENG_PYTEST____FXT__KRKN____DEF_FXT_CFG__ROOTPATH_KRKNHUB:-${_scrPath}/vendor/krknHub}"
@@ -41,6 +46,7 @@ command -v envsubst 1> /dev/null || {
 
 for e in "${!instRootArr[@]}"; do
     instPath="${instRootArr[${e}]%/}"
+    doInst=1
     [ "${instPath::1}" = / ] || instPath="${_scrPath}/${instPath}"
     { [ -e "${instPath}" ] && [ -d "${instPath}" ]; } && {
         case ${mode} in

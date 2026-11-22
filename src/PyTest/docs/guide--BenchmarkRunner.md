@@ -44,8 +44,9 @@ and return values, and [namespace](../README.md#best-practices) and [cleanup](#g
 
 ## Options
 
-  - Under `fxtInf.brCfg`, use `count=1`, `wlName='windows'`, `wlKind='vm'`, and `brEnv={}` defaults. Workload selection uses `<wlName>_<wlKind>`; pass
-    vendor-supported workload settings through the plain `brEnv` dictionary.
+  - Under `fxtInf.brCfg`, defaults are `count=1`, `wlName='windows'`, `wlKind='vm'`, and
+    `brEnv={'WORKLOAD_CONFIG': "{'storage': '96'}"}`. Workload selection uses `<wlName>_<wlKind>`; pass vendor-supported workload settings through the plain
+    `brEnv` dictionary.
   - The runner budget is `timeout.brExecOH + (count * timeout.brExecVM)` minutes, with defaults `30` and `5`. The overhead mainly covers external VM Image
     Template import into an internal PVC; the per-VM allowance covers internal import from that PVC. Expiry stops waiting for the runner and attempts worker
     termination before reconciling created VMs for cleanup.

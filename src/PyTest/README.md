@@ -92,6 +92,10 @@ Run the commands below from `src/PyTest/` using the existing test environment.
 
 Each unit test MUST test only its corresponding module. All external calls MUST be mocked, including built-ins such as `open()`.
 
+Normally leave standard binding or decorator machinery, such as `functools.partial`, real. When the target it wraps or binds is external to the unit being
+tested, whether another function in the same file or an imported one, mock it at the module lookup before the binding is made, then assert the delegation and
+results. If the target is a nested or local function that belongs to the unit, it MUST not be mocked as it is a part of the unit being tested.
+
 Use the separate `pytest--unit.ini` configuration:
 ```bash
 python -m pytest -c pytest--unit.ini test--unit/

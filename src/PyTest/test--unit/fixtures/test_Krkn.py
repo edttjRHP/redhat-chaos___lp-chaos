@@ -293,8 +293,8 @@ def test_FxtKrkn_YieldsFrozenObjectWithMutableContents(
         context = next(generator)
         assert isinstance(context, MUT.FxtObjKrkn)
         assert (
-            {item.name for item in dataclasses.fields(context)} ==
-            {'krknHub', 'fxtInf', 'testPars', 'cli', 'ns'}
+            tuple(item.name for item in dataclasses.fields(context)) ==
+            ('cli', 'ns', 'fxtInf', 'testPars', 'krknHub')
         )
         assert isinstance(context.krknHub, MUT.KrknHub)
         assert (context.krknHub.request is fixtureRequest)

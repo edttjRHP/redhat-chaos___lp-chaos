@@ -1,10 +1,10 @@
 # Direct VM Fixture
 
 Use `fxtVM` to create VMs you can communicate with through `vm.ssh`, provided the image/template configures guest SSH. It supports a user VM YAML/Jinja
-template and multiple VMs; prefer [benchmark-runner](guide--benchmark-runner.md) for scale-oriented workloads. Setup creates the batch, then waits for each
+template and multiple VMs; prefer [benchmark-runner](guide--BenchmarkRunner.md) for scale-oriented workloads. Setup creates the batch, then waits for each
 VM's referenced DataVolumes and starts that VM by default. A successful startup wait establishes VM Ready, not a working guest login.
 
-See the [minimal test and namespace recommendations](../README.md). The fixture is function-scoped. `vmList` contains all wrappers returned during that test;
+See the [minimal test and namespace recommendations](../README.md). The fixture is module-scoped. `vmList` contains all wrappers returned during that module;
 `vmCreate(...)` returns only the additional batch and appends it to `vmList`:
 ```python
 extraVMs = fxtVM.vmCreate(
@@ -12,8 +12,16 @@ extraVMs = fxtVM.vmCreate(
 )
 ```
 
-See the complete [fixture configuration and parametrization](../fixtures/VM.py#L474) and [factory API reference](../fixtures/VM.py#L191) for all parameters and
+See the complete [Fixture Configuration and Parametrization](../fixtures/VM.py#L502) and [factory API reference](../fixtures/VM.py#L192) for all parameters and
 returned values.
+
+
+## Prerequisites
+
+  - Use authenticated `virtctl` access to a CUT with OpenShift Virtualization.
+  - Supply usable guest images, compatible storage, and any image-source credentials; repository values are examples.
+  - For guest communication, provide OpenSSH tools and a guest SSH service/user authorized for the selected key. The bundled Windows template requires its
+    Cloudbase-Init guest setup. Custom images/templates need equivalent setup.
 
 
 ## Essential Options
@@ -35,7 +43,7 @@ Pass these under `fxtInf.vmCfg` using `NamedDict`:
 
 Reused VMs are not checked for matching specifications, image, or credentials and are not import-waited or deleted by the fixture. They may still be started
 when `startVM=True`. Supply an existing unencrypted private SSH key; reuse does not install guest authorization. Owned VMs, Secrets, and namespaces are cleaned
-up at test teardown; pre-existing resources remain unowned. Do not place resources you want retained inside a namespace the fixture owns.
+up at module teardown; pre-existing resources remain unowned. Do not place resources you want retained inside a namespace the fixture owns.
 
 
 ## Image and Guest Access
@@ -105,3 +113,10 @@ raw OpenSSH public-key text in `sshPublicKeyB64`. The fixture fills these; direc
 Keep context values native; the template serializes them at YAML insertion. Validate storage availability, names, quantities, source credentials, and guest
 compatibility for your environment. Optional [context presets](../fixtures/libs/VM/PresetCtx.py) include recommended VM settings to be used for specific use
 case. One or more (merged) of these settings can be used to pre-seed the `fxtInf.vmCfg.ctxData` in Fixture Configuration.
+
+
+## Best Practices
+
+  - The framework [Best Practices](../README.md#best-practices) apply.
+  - Since it take time to create a VM, each test should re-use the prev. test VM, if possible. Either check the `vmList` or create with `reuseExisting=True`.
+  - Assert guest access explicitly when needed. Neither a Ready condition nor possession of an SSH key guarantees guest authorization will be granted.

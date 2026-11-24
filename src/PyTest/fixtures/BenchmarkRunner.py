@@ -16,7 +16,7 @@ from uuid import uuid4
 
 import pytest
 
-from fixtures.libs.CommonConstant import LPQE__DEF__NAMESPACE
+from fixtures.libs.CommonModel import LPQE__DEF__FXT_CFG
 from fixtures.VM import FxtObjVM
 from libs.CustomTypes import NamedDict
 from libs.OpenShift.LP.Virt.VM.VM import VM
@@ -25,17 +25,11 @@ from libs.Utils.LibInVenv import ModInVenv
 
 
 logs = logging.getLogger()
-_DEF__FXT_CFG = NamedDict(
-    kCfg=(
-        os.environ.get('KUBECONFIG') or
-        os.path.expanduser('~/.kube/config')
-    ),
+_DEF__FXT_CFG = LPQE__DEF__FXT_CFG | NamedDict(
     # The `--kubeconfig` option will be overridden by the above `.kCfg`.
     cliCfg=NamedDict(
-        ocCfg={},
         vcCfg={},
     ),
-    ns=LPQE__DEF__NAMESPACE,
     fxtInf=NamedDict(
         rootPath=NamedDict(
             br=Path(os.getenv(
@@ -47,7 +41,7 @@ _DEF__FXT_CFG = NamedDict(
                     f'{Path(__file__).resolve().parent.parent}/'
                     'vendor/BenchmarkRunner'
                 ),
-            )),
+            )).resolve(),
         ),
         brCfg=NamedDict(
             count=1,
@@ -173,9 +167,9 @@ def VMcreateByBR(
         'DELETE_ALL': 'no',
         'SAVE_ARTIFACTS_LOCAL': 'true',
         'RUN_ARTIFACTS_PATH': (
-            os.environ.get('RUN_ARTIFACTS_PATH') or tempfile.mkdtemp()
+            os.getenv('RUN_ARTIFACTS_PATH') or tempfile.mkdtemp()
         ),
-        'SCALE_NODES': (os.environ.get('SCALE_NODES', '')),
+        'SCALE_NODES': (os.getenv('SCALE_NODES', '')),
         'UUID': invocationUUID,
     }
     if isScale:
@@ -311,7 +305,7 @@ def FxtVMbyBR(
     appends to `vmList`.
 
     This is the complete Fixture Configuration reference (see
-    `docs/guide--benchmark-runner.md` for concise usage).
+    `docs/guide--BenchmarkRunner.md` for concise usage).
     Configure via indirect parametrize with `dict`:
         @pytest.mark.parametrize(
             'fxtVMbyBR,',
@@ -333,7 +327,18 @@ def FxtVMbyBR(
             Fixture settings:
               - rootPath:
                 Root dir. of vEnv libraries:
-                  - br: Location where `benchmark-runner` is installed.
+                  - br: Location where `benchmark-runner` is installed
+                    (default:
+                    'IENG_PYTEST____FXT__BENCHMARKRUNNER____DEF_FXT_CFG__ROOTPATH_BR'
+                    Env. Var. value (default:
+                    `'<PyTestRoot>/vendor/BenchmarkRunner'`)).
+                NOTE:
+                  - A rel. path as value of the above Env. Var. will be
+                    resolved against CWD during construction of
+                    `_DEF__FXT_CFG`.
+                  - If overridden (via, i.e. `@pytest.mark.parametrize` or any
+                    function call that allow overiding) with rel. path, it will
+                    be resolved against CWD at the time it is used.
               - brCfg:
                 BenchmarkRunner workload configurations:
                   - count:      Number of VMs to create (default: `1`).

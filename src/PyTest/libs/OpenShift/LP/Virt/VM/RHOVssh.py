@@ -67,7 +67,7 @@ class RHOVsshCon:
         self.user = user
         self.idFile = str(Path(os.path.expandvars(idFile)).expanduser())
         self.ctrlPersist = ctrlPersist
-        kCfg = kubeconfig or os.environ.get('KUBECONFIG') or None
+        kCfg = kubeconfig or os.getenv('KUBECONFIG') or None
         if (cmdExec is None): cmdExec = CmdExec()
         kcOpts = {'kubeconfig': kCfg} if kCfg else {}
         if (oc is None): oc = OCcli(n=ns, **kcOpts)

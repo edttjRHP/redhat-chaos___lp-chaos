@@ -1,33 +1,28 @@
-# PyTest Framework
-
-Use these fixtures to provision VMs, communicate with their guests, and inject chaos into a Cluster Under Test (CUT).
-
-## Choose a Fixture
-
-| Fixture       | Purpose                                                                                       | Lifetime      |
-|---------------|-----------------------------------------------------------------------------------------------|---------------|
-| `fxtVM`       | Create VMs from a supplied or bundled YAML/Jinja template, with guest communication support.  | Per test      |
-| `fxtVMbyBR`   | Deploy VM workloads at scale through benchmark-runner's separate worker process.              | Per module    |
-| `fxtKrkn`     | Inject chaos into the CUT by running a Krkn Hub scenario.                                     | Per test      |
-
-Both VM fixtures return `vmList` and `vmCreate(...)` for additional batches. Setup waits for provisioning and, by default, VM startup/Ready; it is not a
-fire-and-forget background API. `vm.ssh` connects lazily when first used and supports guest commands, PowerShell, and file transfer. Ready does not prove guest
-communication or authorization.
-
-The `fxtVM` can create multiple VMs, but prefer benchmark-runner for scale-oriented workloads rather than the direct fixture's sequential VM operations. This
-is usage guidance, not a measured performance guarantee.
-
-
+# PyTest Test Suite Framework
 ## Prerequisites
 
-- Use Python 3.11 and authenticated `oc`/`virtctl` access to a disposable CUT with OpenShift Virtualization.
-- Supply usable guest images, compatible storage, and any image-source credentials; repository values are examples.
-- For guest communication, provide OpenSSH tools and a guest SSH service/user authorized for the selected key. The bundled Windows template requires its
-  Cloudbase-Init guest setup. Custom images/templates need equivalent setup.
-- Install benchmark-runner in its configured vendor virtual environment, or Krkn and Krkn Hub at their configured paths, only when using those integrations.
-  Krkn rendering also requires GNU `envsubst` and Bash.
-- Align CLI context and runner kubeconfig with the same CUT. `kCfg` defaults to `KUBECONFIG` or `~/.kube/config`; shared CLI factories use their configured CLI
-  context.
+  - Use Python 3.11 and authenticated `oc` access to a disposable Cluster Under Test (CUT).
+  - Align CLI context and runner kubeconfig with the same CUT. `kCfg` defaults to `KUBECONFIG` or `~/.kube/config`; shared CLI factories use their configured
+    CLI context.
+  - Read the `## Prerequisites` sections of all fixture guides (`docs/guide--*.md`):
+      - [`guide--VM.md`](docs/guide--VM.md#prerequisites)
+      - [`guide--Krkn.md`](docs/guide--Krkn.md#prerequisites)
+      - [`guide--BenchmarkRunner.md`](docs/guide--BenchmarkRunner.md#prerequisites)
+
+
+## Setup
+
+Run setup from `src/PyTest/` in the Python environment you intend to use:
+```bash
+./setup.sh    # Production Install (excludes `requirements--unit.txt`).
+./setup.sh 1  # Development Install (includes `requirements--unit.txt`).
+```
+
+Production Install:
+  - Developing Test Suites for product test.
+  - Running the Test Suites in CI for product test.
+Development Install:
+  - Developing this PyTest Test Suite Framework itself.
 
 
 ## Configure and Write a Test
@@ -57,26 +52,19 @@ def test_GuestCommand(fxtVM: FxtObjVM) -> None:
     assert result.success
 ```
 
-Configure image and credentials first. See [direct VMs and custom templates](docs/guide--vm.md), [benchmark-runner](docs/guide--benchmark-runner.md), and
-[Krkn Hub](docs/guide--krkn.md).
+Configure image and credentials first. See [direct VMs and custom templates](docs/guide--VM.md), [benchmark-runner](docs/guide--BenchmarkRunner.md), and
+[Krkn Hub](docs/guide--Krkn.md).
 
 
 ## Best Practices
 
-- **Namespace isolation is a recommendation, not automatic.** Prefer a dedicated namespace per test for `fxtVM` and standalone `fxtKrkn` scenarios. Prefer a
-  dedicated namespace per module for module-scoped `fxtVMbyBR`, whose VMs remain available to that module's tests until teardown. Separate concurrent runs and
-  parameter groups as needed.
-- Share a module namespace only when tests intentionally share VMs and their mutations. Avoid having a function-scoped fixture create a namespace containing
-  module-scoped or caller-owned resources: deleting that namespace removes its contents. Pre-create shared namespaces and manage their lifetime outside the
-  shorter-lived fixture.
-- The `fxtVM` reuses an existing generated name in the same namespace only with `reuseExisting=True`; reused VMs are not owned or deleted by that fixture.
-  Supply valid existing credentials and restore any test changes yourself. The `fxtVMbyBR` does not offer this reuse option and rejects collisions with its
-  generated VM names.
-- VM teardown closes guest connections and attempts deletion only for VMs still matching their recorded ownership. The `fxtVM` also removes namespaces/Secrets
-  it created; pre-existing ones remain. BR cleanup covers its tracked VMs, not every workload artifact or namespace. Krkn scenario cleanup is the scenario
-  author's responsibility.
-- Assert guest access explicitly when needed. Neither a Ready condition nor possession of an SSH key grants guest authorization. Review disruptive scenarios
-  and retained artifacts before use; keep credentials out of source/logs.
+  - **Namespace isolation.** A fixture should fully owns the namespace it creates, so it can tear it down at the end of its lifetime (hence safely and
+    completely cleanup all created test resources). NOTE: Do not place resources need to be retained, after fixture lifetime, inside a fixture-owned namespace.
+  - Review the logs to ensure no credentials leaked.
+  - Read the `## Best Practices` sections of all fixture guides (`docs/guide--*.md`):
+      - [`guide--VM.md`](docs/guide--VM.md#best-practices)
+      - [`guide--Krkn.md`](docs/guide--Krkn.md#best-practices)
+      - [`guide--BenchmarkRunner.md`](docs/guide--BenchmarkRunner.md#best-practices)
 
 
 ## NamedDict Merge API Reference
@@ -88,6 +76,93 @@ Order, duplicates and shallow item identities are preserved; list items are not 
 merges are intentionally not idempotent. Tuples, sets and custom sequences do not concatenate. Other matching values replace, and new keys are inserted
 unchanged. Plain dictionaries cannot override existing non-null `NamedDict` sections. A `None` base accepts the override value; a `None` override replaces the
 existing value with `None`.
+
+
+## Develop a Fixture
+
+When a fixture yields a callable directly or binds setup values with `functools.partial` before yielding it, keep the callable's signature short and stable:
+  - **Frozen parameter dataclass.** Bind persistent setup values, such as the merged Fixture Configuration and shared lists, positionally as one
+    `@dataclasses.dataclass(frozen=True)` parameter (`FuncPars<Name>`). Add optional fields with defaults (`default_factory` for mutable values), so existing
+    constructions and calls keep working without a signature change. Frozen blocks field reassignment, not mutation of field contents, such as appending to a
+    shared list.
+  - **Keyword-only dependencies.** Declare injected fixtures and factories after `*` and bind them by name. Name them distinctly from Fixture Configuration
+    keys, as a call keyword with the same name replaces the bound dependency instead of reaching `**fxtCfgArgs`.
+  - **Use `request` as context.** Bind the fixture's own PyTest `request` (it has the fixture's scope) positionally for context, such as
+    `request.config.rootpath`. It is not an override, as the fixture SHOULD merges `request.param` into `fxtCfgObj` once at setup, so do not merge it again in
+    the callable (list merges are not idempotent).
+  - **Per-call overrides.** Accept `**fxtCfgArgs` and merge them as `fPars.fxtCfgObj | NamedDict(fxtCfgArgs)`. Call values are the right-hand operand: at
+    matching keys, sections recurse, lists append, and other values replace those in `fxtCfgObj` (see
+    [NamedDict Merge API Reference](#nameddict-merge-api-reference)). Only the top level is converted, so pass nested schema sections as `NamedDict`. The merge
+    leaves `fxtCfgObj` unchanged, so overrides apply to that call only. Unmerged nested values remain shared with `fxtCfgObj`, so in-place changes to them
+    persist across calls.
+  - **Typed frozen Fixture Object.** Yield a `@dataclasses.dataclass(frozen=True)` Fixture Object (`FxtObj<Name>`) with typed fields, including the callable. A
+    sub-class that adds fields must also be decorated with `@dataclasses.dataclass(frozen=True)`.
+
+Bundle setup values in `FuncParsFooBar` so you can add fields with defaults without changing the `FooBar` signature or existing calls. Bind `request` for
+PyTest context and use `**fxtCfgArgs` for per-call configuration overrides.
+
+A minimal, non-operational sketch:
+```python
+from collections.abc import Callable, Generator
+import dataclasses
+import functools
+from typing import Any
+
+import pytest
+
+from fixtures.libs.CommonConstant import LPQE__DEF__NAMESPACE
+from libs.CustomTypes import NamedDict
+
+
+_DEF__FXT_CFG = NamedDict(ns=LPQE__DEF__NAMESPACE, testPars=NamedDict())
+
+
+@dataclasses.dataclass(frozen=True)
+class FuncParsFooBar:
+    fxtCfgObj: NamedDict
+    # Add new fields with defaults so existing callers keep working.
+    results: list[NamedDict] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass(frozen=True)
+class FxtObjFXT:
+    fooBar: Callable[..., NamedDict]
+    results: list[NamedDict]
+
+
+def FooBar(
+    request: Any,
+    fPars: FuncParsFooBar,
+    *,
+    ocCLI: Callable[..., Any],
+    **fxtCfgArgs: Any,
+) -> NamedDict:
+    fxtCfg = fPars.fxtCfgObj | NamedDict(fxtCfgArgs)
+    result = NamedDict(rootPath=request.config.rootpath, fxtCfg=fxtCfg)
+    fPars.results.append(result)
+    return result
+
+
+@pytest.fixture(name='fxtFXT', scope='module')
+def FxtFXT(
+    request: Any,
+    fxtOCcli: Callable[..., Any],
+) -> Generator[FxtObjFXT, None, None]:
+    fxtCfg = _DEF__FXT_CFG | NamedDict(**getattr(request, 'param', {}))
+    results = []
+    yield FxtObjFXT(
+        fooBar=functools.partial(
+            FooBar,
+            request,
+            FuncParsFooBar(fxtCfgObj=fxtCfg, results=results),
+            ocCLI=fxtOCcli,
+        ),
+        results=results,
+    )
+```
+
+For example, a test calls `fxtFXT.fooBar(ns='my-test', testPars=NamedDict(tag='a'))`. Adding a defaulted `FuncParsFooBar` field later leaves that call and
+the `FooBar` signature unchanged.
 
 
 ## Test Locations
@@ -103,6 +178,10 @@ Run the commands below from `src/PyTest/` using the existing test environment.
 ### Unit Tests
 
 Each unit test MUST test only its corresponding module. All external calls MUST be mocked, including built-ins such as `open()`.
+
+Normally leave standard binding or decorator machinery, such as `functools.partial`, real. When the target it wraps or binds is external to the unit being
+tested, whether another function in the same file or an imported one, mock it at the module lookup before the binding is made, then assert the delegation and
+results. If the target is a nested or local function that belongs to the unit, it MUST not be mocked as it is a part of the unit being tested.
 
 Use the separate `pytest--unit.ini` configuration:
 ```bash
@@ -124,13 +203,14 @@ python -m pytest -c pytest--contract.ini
 ### Live Test Suites
 
 Put live CUT scenarios under `test--suites/` (examples are in `test--suites/ts--example/`). The root [`conftest.py`](conftest.py) registers the
-[fixtures](#choose-a-fixture). Use indirect parametrization for configuration and normal assertions for outcomes.
+[Fixtures](#choose-a-fixture). Use indirect parametrization for configuration and normal assertions for outcomes.
 
 Markers in the `ts--example/`:
-  - `vm`: [direct VM example](test--suites/ts--example/test_VM.py) creates a VM and asserts a guest PowerShell response.
-  - `vm__br`: [benchmark-runner examples](test--suites/ts--example/test_BenchmarkRunner.py) include two VM Ready checks and a skipped legacy guest
-    SSH/file-transfer test.
-  - `krkn`: [Krkn examples](test--suites/ts--example/test_Krkn.py) are skipped launcher-Pod/host-observation placeholders.
+  - `vm`: A [Direct VM example](test--suites/ts--example/test_VM.py) creates a VM and asserts a guest PowerShell response.
+  - `vm__br`: The [benchmark-runner examples](test--suites/ts--example/test_BenchmarkRunner.py) include two VM Ready checks and a skipped legacy guest SSH /
+    file-transfer test.
+  - `krkn`: A [KrknHub `pod-scenario` example](test--suites/ts--example/test_Krkn.py) kills a Pod in a Deployment and asserts a new one is respawned
+    automatically.
 
 Inspect live-suite selection without executing fixture setup:
 ```bash
@@ -141,3 +221,21 @@ python -m pytest -c pytest.ini test--suites/ -m krkn --collect-only
 ```
 
 Only remove `--collect-only` on an authorized, disposable CUT after reviewing the selected tests' creation, disruption, guest-access, and cleanup requirements.
+
+
+#### Choose a Fixture
+
+Use these Fixtures to provision VMs, communicate with their guests, and inject chaos into a Cluster Under Test (CUT).
+
+| Fixture       | Purpose                                                                                       | Lifetime      |
+|---------------|-----------------------------------------------------------------------------------------------|---------------|
+| `fxtVM`       | Create VMs from a supplied or bundled YAML/Jinja template, with guest communication support.  | Per module    |
+| `fxtVMbyBR`   | Deploy VM workloads at scale through benchmark-runner's separate worker process.              | Per module    |
+| `fxtKrkn`     | Inject chaos into the CUT by running a Krkn Hub scenario.                                     | Per test      |
+
+Both VM Fixtures return `vmList` and `vmCreate(...)` for additional batches. Setup waits for provisioning and, by default, VM startup/Ready; it is not a
+fire-and-forget background API. `vm.ssh` connects lazily when first used and supports guest commands, PowerShell, and file transfer. Ready does not prove guest
+communication or authorization.
+
+The `fxtVM` can create multiple VMs, but prefer `benchmark-runner` for scale-oriented workloads rather than the direct fixture's sequential VM operations. This
+is usage guidance, not a measured performance guarantee.

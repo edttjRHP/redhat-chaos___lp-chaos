@@ -176,9 +176,6 @@ def VMTestContext(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         MUT, 'sys',
         SimpleNamespace(exc_info=mock.Mock(return_value=(None, None, None))),
     )
-    monkeypatch.setattr(
-        MUT, 'functools', SimpleNamespace(partial=mock.Mock(name='partial')),
-    )
     monkeypatch.setattr(MUT, 'logs', mock.Mock())
 
     return SimpleNamespace(

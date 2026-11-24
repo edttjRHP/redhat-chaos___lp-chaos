@@ -7,7 +7,6 @@ import pytest
 
 from libs.CustomTypes import NamedDict
 
-
 if TYPE_CHECKING:
     from fixtures.BenchmarkRunner import FxtObjVMbyBR
 

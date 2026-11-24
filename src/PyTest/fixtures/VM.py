@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from fixtures.libs.CommonConstant import LPQE__DEF__NAMESPACE
+from fixtures.libs.CommonModel import LPQE__DEF__FXT_CFG
 from libs.CustomTypes import NamedDict
 from libs.OpenShift.LP.Virt.Resources import VirtualMachine
 from libs.OpenShift.LP.Virt.VM.VM import VM
@@ -27,17 +27,11 @@ from libs.Utils.YAML import YAMLcfg
 
 
 logs = logging.getLogger()
-_DEF__FXT_CFG = NamedDict(
-    kCfg=(
-        os.environ.get('KUBECONFIG') or
-        os.path.expanduser('~/.kube/config')
-    ),
+_DEF__FXT_CFG = LPQE__DEF__FXT_CFG | NamedDict(
     # The `--kubeconfig` option will be overridden by the above `.kCfg`.
     cliCfg=NamedDict(
-        ocCfg={},
         vcCfg={},
     ),
-    ns=LPQE__DEF__NAMESPACE,
     fxtInf=NamedDict(
         vmCfg=NamedDict(
             cfgTmpl='cfg-template--vm.yaml',
@@ -498,7 +492,7 @@ def _RetainNS(oc: OCcli, resRef: str) -> bool:
     return True
 
 
-@pytest.fixture(name='fxtVM', scope='function')
+@pytest.fixture(name='fxtVM', scope='module')
 def FxtVM(
     request: Any,
     fxtOCcli: Callable[..., Any],
@@ -507,7 +501,7 @@ def FxtVM(
     '''
     Create initial VMs and expose their shared factory and aggregate list.
 
-    VMs live for one test. Startup waits for it to be Ready, not guaranteeing
+    VMs live for one module. Startup waits for it to be Ready, not guaranteeing
     SSH connection to the Guest OS. The used VM Image Template and VM Template
     provide guest authorization. Reused VMs may still be started but are not
     owned.
@@ -520,7 +514,7 @@ def FxtVM(
     `vmCreate(...)` returns only its batch and appends it to `vmList`.
 
     This is the complete Fixture Configuration reference (see
-    `docs/guide--vm.md` for concise usage and custom YAML templates).
+    `docs/guide--VM.md` for concise usage and custom YAML templates).
     Configure via indirect parametrize with `dict`:
         @pytest.mark.parametrize(
             'fxtVM,',

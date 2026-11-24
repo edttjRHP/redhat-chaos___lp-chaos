@@ -4,7 +4,7 @@ from dataclasses import FrozenInstanceError
 import json
 from pathlib import PurePosixPath
 from types import SimpleNamespace
-from typing import get_args, get_origin
+from typing import Any, get_args, get_origin
 from unittest import mock
 
 import pytest
@@ -174,7 +174,8 @@ def PatchModule(
         raise AssertionError('Initial config must use this test config script')
 
     (localPath, pathProbes, fileResults) = MakePathBinding()
-    localOS = SimpleNamespace(environ={})
+    localEnv = {}
+    localOS = SimpleNamespace(environ=localEnv, getenv=localEnv.get)
     localTempfile = SimpleNamespace()
     localSys = SimpleNamespace()
 
@@ -328,7 +329,7 @@ def test__DEF__FXT_CFG_UsesNestedWorkloadConfiguration(
     assert (brConfig.startVM is True)
     assert (brConfig.wlName == 'windows')
     assert (brConfig.wlKind == 'vm')
-    assert (brConfig.brEnv == {})
+    assert (brConfig.brEnv == {'WORKLOAD_CONFIG': "{'storage': '96'}"})
     assert (timeout.brExecOH == 30)
     assert (timeout.brExecVM == 5)
     assert (timeout.vmStart == '15m')
@@ -876,6 +877,7 @@ def test_VMcreateByBR_ZeroCountReturnsEmptyWithoutRunner(
     moduleBoundary.getResUID.assert_not_called()
     moduleBoundary.uuidFactory.assert_not_called()
     moduleBoundary.tempfileProxy.mkdtemp.assert_not_called()
+    moduleBoundary.vmFactory.assert_not_called()
     moduleBoundary.runnerFactory.assert_not_called()
 
 
@@ -945,23 +947,27 @@ def test_VMcreateByBR_RunnerFailurePreservesPrimaryErrorDuringReconciliation(
         'SCALE_NODES': '[\'synthetic-worker\']',
         'RUN_ARTIFACTS_PATH': '/tmp',
     })
-    rawBrConfig = {'count': 3}
+    rawBrConfig = {'count': 4}
     rawOverrides = {'fxtInf': {'brCfg': rawBrConfig}}
-    effectiveConfig = moduleBoundary.configScript.Config(count=3)
+    effectiveConfig = moduleBoundary.configScript.Config(count=4)
     QueueDirectConfig(moduleBoundary, effectiveConfig)
     moduleBoundary.uuidResults.append('abcd-rest')
-    moduleBoundary.ocClientResults.extend([
+    ocClients = [
         SimpleNamespace(name='oc-zero'),
         SimpleNamespace(name='oc-one'),
         SimpleNamespace(name='oc-two'),
-    ])
+        SimpleNamespace(name='oc-three'),
+    ]
+    moduleBoundary.ocClientResults.extend(ocClients)
     moduleBoundary.uidResults.extend([
+        (True, '', ''),
         (True, '', ''),
         (True, '', ''),
         (True, '', ''),
         (False, '', 'lookup failed'),
         (True, '', ''),
         RuntimeError('lookup exploded'),
+        (True, 'partial-uid', ''),
     ])
     runner = MakeRunner()
     primary = ValueError('runner failed')
@@ -992,7 +998,10 @@ def test_VMcreateByBR_RunnerFailurePreservesPrimaryErrorDuringReconciliation(
         moduleBoundary.logs.error.call_args_list[1].args[0]
     ))
     assert (fPars.vmList == [])
-    assert (fPars.ownResTrk.VMs == [])
+    assert (fPars.ownResTrk.VMs == [
+        (ocClients[3], 'VirtualMachine/windows-vm-abcd-3', 'partial-uid'),
+    ])
+    moduleBoundary.vmFactory.assert_not_called()
 
 
 def test_VMcreateByBR_ReconciliationLookupFailureRaisesWithoutRunnerError(
@@ -1215,42 +1224,147 @@ def test_VMcreateByBR_RejectsZeroTotalExecutionBudget(
     moduleBoundary.vmFactory.assert_not_called()
 
 
-def BindVMcreateByBR(
-    target: Callable[..., object],
-    request: object,
-    fPars: MUT.FuncParsVMcreateByBR,
-    *,
-    ocCLI: Callable[..., object],
-    virtCtlCLI: Callable[..., object],
-) -> Callable[..., object]:
-    '''Bind only the fixture's fixed VMcreateByBR arguments.'''
-    boundOC = ocCLI
-    boundVirtCtl = virtCtlCLI
+@pytest.mark.parametrize('outcome', ['ready', 'false', 'exception', 'manual'])
+@pytest.mark.parametrize('customTimeout', [None, '7m'])
+def test_VMcreateByBR_StartTracksOwnershipAndPreservesFailures(
+    moduleBoundary: SimpleNamespace,
+    outcome: str,
+    customTimeout: str | None,
+) -> None:
+    primary = RuntimeError('synthetic startup failure')
+    rawOverrides = {'fxtInf': {'brCfg': {'count': 2}}}
+    config = moduleBoundary.configScript.Config(
+        count=2, startVM=(outcome != 'manual'),
+        brEnv={
+            'UNIT_BR_CUSTOM': 'child',
+            'SAVE_ARTIFACTS_LOCAL': 'false',
+            'DELETE_ALL': 'yes',
+        },
+        vmStart=(customTimeout or '15m'),
+    )
+    QueueDirectConfig(moduleBoundary, config)
+    localEnvironment = moduleBoundary.osProxy.environ
+    localEnvironment.update({
+        'SCALE_NODES': '[\'synthetic-worker\']',
+        'UNIT_BR_CUSTOM': 'parent',
+        'RUN_ARTIFACTS_PATH': '/artifacts',
+    })
+    environmentBefore = dict(localEnvironment)
+    wrappers = [
+        mock.Mock(name='startup VM zero'),
+        mock.Mock(name='startup VM one'),
+    ]
 
-    def Invoke(
-        *args: object,
-        ocCLI: Callable[..., object] = boundOC,
-        virtCtlCLI: Callable[..., object] = boundVirtCtl,
-        **fxtCfgArgs: object,
-    ) -> object:
-        return target(
-            request,
+    if (outcome == 'exception'): wrappers[0].Start.side_effect = primary
+    elif (outcome == 'false'): wrappers[0].Start.return_value = False
+    else: wrappers[0].Start.return_value = True
+    wrappers[1].Start.return_value = True
+    clients = [
+        SimpleNamespace(name='startup OC zero'),
+        SimpleNamespace(name='startup OC one'),
+    ]
+    virtClients = [
+        SimpleNamespace(name='startup virtctl zero'),
+        SimpleNamespace(name='startup virtctl one'),
+    ]
+    runner = MakeRunner()
+    QueueVMcreateByBRInputs(
+        moduleBoundary,
+        invocationUUID='startup-rest',
+        ocClients=clients,
+        virtCtlClients=virtClients,
+        vmObjects=wrappers,
+        uidResults=[
+            (True, '', ''), (True, '', ''),
+            (True, 'uid-zero', ''), (True, 'uid-one', ''),
+        ],
+        runner=runner,
+    )
+    moduleBoundary.excInfoResults.append((None, None, None))
+    vmList: list[object] = []
+    ownVMs: list[object] = []
+    fPars = MakeFuncPars(moduleBoundary.initialConfig, vmList, ownVMs)
+
+    if (outcome in ('false', 'exception')):
+        with pytest.raises(RuntimeError) as raised:
+            MUT.VMcreateByBR(
+                SimpleNamespace(),
+                fPars,
+                ocCLI=moduleBoundary.ocFactory,
+                virtCtlCLI=moduleBoundary.virtCtlFactory,
+                **rawOverrides,
+            )
+
+        if (outcome == 'exception'): assert (raised.value is primary)
+        else: assert ('default/windows-vm-startup-0' in str(raised.value))
+        trackedVMs = wrappers[:1]
+        wrappers[1].Start.assert_not_called()
+    else:
+        created = MUT.VMcreateByBR(
+            SimpleNamespace(),
             fPars,
-            *args,
-            ocCLI=ocCLI,
-            virtCtlCLI=virtCtlCLI,
-            **fxtCfgArgs,
+            ocCLI=moduleBoundary.ocFactory,
+            virtCtlCLI=moduleBoundary.virtCtlFactory,
+            **rawOverrides,
+        )
+        assert (created == wrappers)
+        trackedVMs = wrappers
+
+    assert (vmList == trackedVMs)
+    assert (ownVMs == [
+        (clients[0], 'VirtualMachine/windows-vm-startup-0', 'uid-zero'),
+        (clients[1], 'VirtualMachine/windows-vm-startup-1', 'uid-one'),
+    ])
+    if (outcome == 'manual'):
+        wrappers[0].Start.assert_not_called()
+        wrappers[1].Start.assert_not_called()
+    else:
+        wrappers[0].Start.assert_called_once_with(
+            timeout=(customTimeout or '15m'),
+        )
+        if (outcome == 'ready'):
+            wrappers[1].Start.assert_called_once_with(
+                timeout=(customTimeout or '15m'),
+            )
+    environment = runner.Call.call_args.kwargs['envUpd']
+    assert (environment['SAVE_ARTIFACTS_LOCAL'] == 'true')
+    assert (environment['DELETE_ALL'] == 'no')
+    assert (environment['UNIT_BR_CUSTOM'] == 'child')
+    assert (environment['SCALE_NODES'] == '[\'synthetic-worker\']')
+    assert (localEnvironment == environmentBefore)
+
+
+@pytest.mark.parametrize('argument', ['request', 'fPars'])
+def test_VMcreateByBR_RejectsInternalKeywordReplacementBeforeOperations(
+    moduleBoundary: SimpleNamespace,
+    argument: str,
+) -> None:
+    vmList: list[object] = []
+    ownVMs: list[object] = []
+    fPars = MakeFuncPars(moduleBoundary.initialConfig, vmList, ownVMs)
+
+    with pytest.raises(TypeError, match='multiple values'):
+        MUT.VMcreateByBR(
+            SimpleNamespace(),
+            fPars,
+            ocCLI=moduleBoundary.ocFactory,
+            virtCtlCLI=moduleBoundary.virtCtlFactory,
+            **{argument: object()},
         )
 
-    return Invoke
+    assert (vmList == [])
+    assert (ownVMs == [])
+    moduleBoundary.namedDictFactory.assert_not_called()
+    moduleBoundary.ocFactory.assert_not_called()
+    moduleBoundary.virtCtlFactory.assert_not_called()
+    moduleBoundary.getResUID.assert_not_called()
 
 
-def PatchFixturePartial(monkeypatch: pytest.MonkeyPatch) -> mock.Mock:
-    '''Replace only BenchmarkRunner's module-local partial binding.'''
-    partialFactory = mock.Mock(side_effect=BindVMcreateByBR)
-    localFunctools = SimpleNamespace(partial=partialFactory)
-    monkeypatch.setattr(MUT, 'functools', localFunctools)
-    return partialFactory
+def PatchVMcreateByBR(monkeypatch: pytest.MonkeyPatch, **mockArgs: Any) -> Any:
+    '''Patch VMcreateByBR with a signature-checked mock before binding.'''
+    vmCreate = mock.create_autospec(MUT.VMcreateByBR, **mockArgs)
+    monkeypatch.setattr(MUT, 'VMcreateByBR', vmCreate)
+    return vmCreate
 
 
 def QueueFixtureConfigAndOwnership(
@@ -1261,17 +1375,6 @@ def QueueFixtureConfigAndOwnership(
     QueueDirectConfig(moduleBoundary, effectiveConfig)
 
     moduleBoundary.configScript.QueueFactoryResults(SimpleNamespace(VMs=[]))
-
-
-def QueueFixtureInitialConfig(
-    moduleBoundary: SimpleNamespace,
-    effectiveConfig: CaseConfig,
-) -> None:
-    '''Queue fixture config, tracker, and real create merge.'''
-    QueueFixtureConfigAndOwnership(moduleBoundary, effectiveConfig)
-    QueueDirectConfig(
-        moduleBoundary, effectiveConfig, baseConfig=effectiveConfig,
-    )
 
 
 def QueueExcInfo(
@@ -1347,33 +1450,27 @@ def test_FxtVMbyBR_InitialNegativeFailsBeforeYieldWithoutCleanup(
     monkeypatch: pytest.MonkeyPatch,
     moduleBoundary: SimpleNamespace,
 ) -> None:
-    partialFactory = PatchFixturePartial(monkeypatch)
+    error = ValueError('synthetic initial create failure')
+    vmCreate = PatchVMcreateByBR(monkeypatch, side_effect=error)
     effectiveConfig = moduleBoundary.configScript.Config(count=-1)
-    QueueFixtureInitialConfig(moduleBoundary, effectiveConfig)
+    QueueFixtureConfigAndOwnership(moduleBoundary, effectiveConfig)
     request = SimpleNamespace(param={'fxtInf': {'brCfg': {'count': -1}}})
     ocFactory = moduleBoundary.ocFactory
     virtCtlFactory = moduleBoundary.virtCtlFactory
-    QueueExcInfo(moduleBoundary, ValueError('active setup error'))
+    QueueExcInfo(moduleBoundary, error)
 
     generator = MUT.FxtVMbyBR.__wrapped__(request, ocFactory, virtCtlFactory)
     with pytest.raises(ValueError) as raised:
         next(generator)
 
-    assert (str(raised.value) == 'VM count must not be negative.')
-    fPars = partialFactory.call_args.args[2]
-    partialFactory.assert_called_once_with(
-        MUT.VMcreateByBR,
-        request,
-        fPars,
-        ocCLI=ocFactory,
-        virtCtlCLI=virtCtlFactory,
-    )
+    assert (raised.value is error)
+    fPars = vmCreate.call_args_list[0].args[1]
+    assert (vmCreate.call_args_list == [mock.call(
+        request, fPars, ocCLI=ocFactory, virtCtlCLI=virtCtlFactory,
+    )])
     assert (fPars.fxtCfgObj is effectiveConfig)
     assert (fPars.vmList == [])
     assert (fPars.ownResTrk.VMs == [])
-    moduleBoundary.getResUID.assert_not_called()
-    moduleBoundary.uuidFactory.assert_not_called()
-    moduleBoundary.runnerFactory.assert_not_called()
     moduleBoundary.cleanupVMs.assert_not_called()
 
 
@@ -1381,12 +1478,10 @@ def test_FxtVMbyBR_InitialZeroYieldsFrozenEmptyBundleWithoutCleanup(
     monkeypatch: pytest.MonkeyPatch,
     moduleBoundary: SimpleNamespace,
 ) -> None:
-    partialFactory = PatchFixturePartial(monkeypatch)
+    batch: list[object] = []
+    vmCreate = PatchVMcreateByBR(monkeypatch, return_value=batch)
     effectiveConfig = moduleBoundary.configScript.Config(count=0)
-    QueueFixtureInitialConfig(moduleBoundary, effectiveConfig)
-    QueueDirectConfig(
-        moduleBoundary, effectiveConfig, baseConfig=effectiveConfig,
-    )
+    QueueFixtureConfigAndOwnership(moduleBoundary, effectiveConfig)
     request = SimpleNamespace(param={'fxtInf': {'brCfg': {'count': 0}}})
     ocFactory = moduleBoundary.ocFactory
     virtCtlFactory = moduleBoundary.virtCtlFactory
@@ -1398,35 +1493,25 @@ def test_FxtVMbyBR_InitialZeroYieldsFrozenEmptyBundleWithoutCleanup(
     assert (isinstance(bundle, MUT.FxtObjVMbyBR))
     assert (issubclass(MUT.FxtObjVMbyBR, MUT.FxtObjVM))
     assert (bundle.vmList == [])
-    assert (bundle.vmCreate() == [])
+    assert (bundle.vmCreate() is batch)
     with pytest.raises(FrozenInstanceError):
         bundle.vmList = []
-    fPars = partialFactory.call_args.args[2]
-    partialFactory.assert_called_once_with(
-        MUT.VMcreateByBR,
-        request,
-        fPars,
-        ocCLI=ocFactory,
-        virtCtlCLI=virtCtlFactory,
-    )
+    fPars = vmCreate.call_args_list[0].args[1]
+    assert (vmCreate.call_args_list == [
+        mock.call(request, fPars, ocCLI=ocFactory, virtCtlCLI=virtCtlFactory),
+        mock.call(request, fPars, ocCLI=ocFactory, virtCtlCLI=virtCtlFactory),
+    ])
+    assert (fPars.fxtCfgObj is effectiveConfig)
     assert (bundle.vmList is fPars.vmList)
     assert (fPars.ownResTrk.VMs == [])
     generator.close()
     moduleBoundary.cleanupVMs.assert_not_called()
-    moduleBoundary.getResUID.assert_not_called()
-    moduleBoundary.uuidFactory.assert_not_called()
-    moduleBoundary.tempfileProxy.mkdtemp.assert_not_called()
-    moduleBoundary.runnerFactory.assert_not_called()
-    moduleBoundary.vmFactory.assert_not_called()
-    ocFactory.assert_not_called()
-    virtCtlFactory.assert_not_called()
 
 
 def test_FxtVMbyBR_InitialSuccessUsesSelectedConfigAndCleansOnClose(
     monkeypatch: pytest.MonkeyPatch,
     moduleBoundary: SimpleNamespace,
 ) -> None:
-    partialFactory = PatchFixturePartial(monkeypatch)
     config = moduleBoundary.configScript.Config(
         count=1,
         wlName='initial',
@@ -1435,7 +1520,7 @@ def test_FxtVMbyBR_InitialSuccessUsesSelectedConfigAndCleansOnClose(
         ocCfg={'context': 'initial-context'},
         vcCfg={'kubeconfig': '/initial-config'},
     )
-    QueueFixtureInitialConfig(moduleBoundary, config)
+    QueueFixtureConfigAndOwnership(moduleBoundary, config)
     request = SimpleNamespace(param={
         'ns': 'initial-ns',
         'kCfg': '/initial/kubeconfig',
@@ -1443,20 +1528,13 @@ def test_FxtVMbyBR_InitialSuccessUsesSelectedConfigAndCleansOnClose(
     })
     before = ConfigSnapshot(config)
     oc = SimpleNamespace(name='initial OC client')
-    virtCtl = SimpleNamespace(name='initial virtctl client')
     vm = mock.Mock(name='initial VM')
-    runner = MakeRunner()
-    moduleBoundary.osProxy.environ['RUN_ARTIFACTS_PATH'] = '/artifacts'
-    QueueVMcreateByBRInputs(
-        moduleBoundary,
-        invocationUUID='initial-rest',
-        ocClients=[oc],
-        virtCtlClients=[virtCtl],
-        vmObjects=[vm],
-        uidResults=[(True, '', ''), (True, 'initial-uid', '')],
-        runner=runner,
+    record = (oc, 'VirtualMachine/initial-vm-initial', 'initial-uid')
+    calls: list[tuple[object, ...]] = []
+    target = MakeLifecycleVMcreateByBR(
+        calls, deque([[vm]]), deque([([vm], [record])]),
     )
-    moduleBoundary.excInfoResults.append((None, None, None))
+    vmCreate = PatchVMcreateByBR(monkeypatch, side_effect=target)
     moduleBoundary.cleanupResults.append(None)
     ocFactory = moduleBoundary.ocFactory
     virtCtlFactory = moduleBoundary.virtCtlFactory
@@ -1465,176 +1543,27 @@ def test_FxtVMbyBR_InitialSuccessUsesSelectedConfigAndCleansOnClose(
     generator = MUT.FxtVMbyBR.__wrapped__(request, ocFactory, virtCtlFactory)
     bundle = next(generator)
 
-    fPars = partialFactory.call_args.args[2]
-    assert (bundle.vmList is fPars.vmList)
+    fPars = vmCreate.call_args_list[0].args[1]
+    assert (vmCreate.call_args_list == [mock.call(
+        request, fPars, ocCLI=ocFactory, virtCtlCLI=virtCtlFactory,
+    )])
     assert (fPars.fxtCfgObj is config)
+    assert (bundle.vmList is fPars.vmList)
     assert (bundle.vmList == [vm])
-    assert (vm.Start.call_args.kwargs == {'timeout': '15m'})
-    ocFactory.assert_called_once_with(
-        ns='initial-ns',
-        context='initial-context',
-        kubeconfig='/initial/kubeconfig',
-    )
-    virtCtlFactory.assert_called_once_with(
-        ns='initial-ns',
-        kubeconfig='/initial/kubeconfig',
-    )
-    moduleBoundary.runnerFactory.assert_called_once_with(
-        config.fxtInf.rootPath.br,
-        execTO=2100,
-    )
-    runner.Call.assert_called_once_with(
-        'benchmark_runner.main.main',
-        'main',
-        envUpd=mock.ANY,
-    )
-    partialFactory.assert_called_once_with(
-        MUT.VMcreateByBR,
-        request,
-        fPars,
-        ocCLI=ocFactory,
-        virtCtlCLI=virtCtlFactory,
-    )
+    assert (fPars.ownResTrk.VMs == [record])
     generator.close()
     moduleBoundary.cleanupVMs.assert_called_once_with(
         bundle.vmList,
-        [(oc, 'VirtualMachine/initial-vm-initial', 'initial-uid')],
+        [record],
         optsCleanUpRes={'optsDelRes': {'waitTime': '5m'}},
     )
     assert (ConfigSnapshot(config) == before)
-
-
-@pytest.mark.parametrize('outcome', ['ready', 'false', 'exception', 'manual'])
-@pytest.mark.parametrize('customTimeout', [None, '7m'])
-def test_FxtVMbyBR_StartTracksOwnershipAndPreservesFailures(
-    monkeypatch: pytest.MonkeyPatch,
-    moduleBoundary: SimpleNamespace,
-    outcome: str,
-    customTimeout: str | None,
-) -> None:
-    partialFactory = PatchFixturePartial(monkeypatch)
-    primary = RuntimeError('synthetic startup failure')
-    config = moduleBoundary.configScript.Config(
-        count=2, startVM=(outcome != 'manual'),
-        brEnv={
-            'UNIT_BR_CUSTOM': 'child',
-            'SAVE_ARTIFACTS_LOCAL': 'false',
-            'DELETE_ALL': 'yes',
-        },
-        vmStart=(customTimeout or '15m'),
-        vmRemove='11m' if (customTimeout is not None) else '5m',
-    )
-    QueueFixtureInitialConfig(moduleBoundary, config)
-    request = SimpleNamespace(param={'fxtInf': {'brCfg': {'count': 2}}})
-    localEnvironment = moduleBoundary.osProxy.environ
-    localEnvironment.update({
-        'SCALE_NODES': '[\'synthetic-worker\']',
-        'UNIT_BR_CUSTOM': 'parent',
-        'RUN_ARTIFACTS_PATH': '/artifacts',
-    })
-    environmentBefore = dict(localEnvironment)
-    wrappers = [
-        mock.Mock(name='startup VM zero'),
-        mock.Mock(name='startup VM one'),
-    ]
-
-    if (outcome == 'exception'): wrappers[0].Start.side_effect = primary
-    elif (outcome == 'false'): wrappers[0].Start.return_value = False
-    else: wrappers[0].Start.return_value = True
-    wrappers[1].Start.return_value = True
-    clients = [
-        SimpleNamespace(name='startup OC zero'),
-        SimpleNamespace(name='startup OC one'),
-    ]
-    virtClients = [
-        SimpleNamespace(name='startup virtctl zero'),
-        SimpleNamespace(name='startup virtctl one'),
-    ]
-    runner = MakeRunner()
-    QueueVMcreateByBRInputs(
-        moduleBoundary,
-        invocationUUID='startup-rest',
-        ocClients=clients,
-        virtCtlClients=virtClients,
-        vmObjects=wrappers,
-        uidResults=[
-            (True, '', ''), (True, '', ''),
-            (True, 'uid-zero', ''), (True, 'uid-one', ''),
-        ],
-        runner=runner,
-    )
-    moduleBoundary.excInfoResults.append((None, None, None))
-    moduleBoundary.cleanupResults.append(None)
-
-    if (outcome == 'exception'): QueueExcInfo(moduleBoundary, primary)
-    elif (outcome == 'false'):
-        QueueExcInfo(moduleBoundary, RuntimeError('active false-start error'))
-    else: QueueExcInfo(moduleBoundary, GeneratorExit())
-    ocFactory = moduleBoundary.ocFactory
-    virtCtlFactory = moduleBoundary.virtCtlFactory
-
-    generator = MUT.FxtVMbyBR.__wrapped__(request, ocFactory, virtCtlFactory)
-    if (outcome in ('false', 'exception')):
-        with pytest.raises(RuntimeError) as raised:
-            next(generator)
-
-        if (outcome == 'exception'): assert (raised.value is primary)
-        else: assert ('default/windows-vm-startup-0' in str(raised.value))
-        trackedVMs = wrappers[:1]
-        wrappers[1].Start.assert_not_called()
-    else:
-        bundle = next(generator)
-        assert (bundle.vmList == wrappers)
-        trackedVMs = wrappers
-        moduleBoundary.cleanupVMs.assert_not_called()
-        generator.close()
-
-    fPars = partialFactory.call_args.args[2]
-    expectedWait = '11m' if (customTimeout is not None) else '5m'
-    ownership = [
-        (clients[0], 'VirtualMachine/windows-vm-startup-0', 'uid-zero'),
-        (clients[1], 'VirtualMachine/windows-vm-startup-1', 'uid-one'),
-    ]
-    moduleBoundary.cleanupVMs.assert_called_once_with(
-        trackedVMs,
-        ownership,
-        optsCleanUpRes={'optsDelRes': {'waitTime': expectedWait}},
-    )
-    if (outcome == 'manual'):
-        wrappers[0].Start.assert_not_called()
-        wrappers[1].Start.assert_not_called()
-    else:
-        wrappers[0].Start.assert_called_once_with(
-            timeout=(customTimeout or '15m'),
-        )
-        if (outcome == 'ready'):
-            wrappers[1].Start.assert_called_once_with(
-                timeout=(customTimeout or '15m'),
-            )
-    environment = runner.Call.call_args.kwargs['envUpd']
-    assert (environment['SAVE_ARTIFACTS_LOCAL'] == 'true')
-    assert (environment['DELETE_ALL'] == 'no')
-    assert (environment['UNIT_BR_CUSTOM'] == 'child')
-    assert (environment['SCALE_NODES'] == '[\'synthetic-worker\']')
-    assert (localEnvironment == environmentBefore)
-    partialFactory.assert_called_once_with(
-        MUT.VMcreateByBR,
-        request,
-        fPars,
-        ocCLI=ocFactory,
-        virtCtlCLI=virtCtlFactory,
-    )
-
-    assert (fPars.fxtCfgObj is config)
-    assert (fPars.vmList == trackedVMs)
-    assert (fPars.ownResTrk.VMs == ownership)
 
 
 def test_FxtVMbyBR_RetainsSetupAndIsolatesTemporaryOverrides(
     monkeypatch: pytest.MonkeyPatch,
     moduleBoundary: SimpleNamespace,
 ) -> None:
-    partialFactory = PatchFixturePartial(monkeypatch)
     setup = {
         'ns': 'setup-ns',
         'kCfg': '/setup/kubeconfig',
@@ -1690,7 +1619,7 @@ def test_FxtVMbyBR_RetainsSetupAndIsolatesTemporaryOverrides(
         ([], []), ([vmTwo], [ownedTwo]), ([vmThree], [ownedThree]),
     ])
     target = MakeLifecycleVMcreateByBR(calls, outcomes, stateAdds)
-    monkeypatch.setattr(MUT, 'VMcreateByBR', target)
+    vmCreate = PatchVMcreateByBR(monkeypatch, side_effect=target)
     ocFactory = moduleBoundary.ocFactory
     virtCtlFactory = moduleBoundary.virtCtlFactory
     moduleBoundary.cleanupResults.append(None)
@@ -1698,7 +1627,7 @@ def test_FxtVMbyBR_RetainsSetupAndIsolatesTemporaryOverrides(
 
     generator = MUT.FxtVMbyBR.__wrapped__(request, ocFactory, virtCtlFactory)
     bundle = next(generator)
-    fPars = partialFactory.call_args.args[2]
+    fPars = vmCreate.call_args_list[0].args[1]
     configBefore = ConfigSnapshot(fPars.fxtCfgObj)
     assert (bundle.vmList is fPars.vmList)
     assert (bundle.vmCreate() == [])
@@ -1724,13 +1653,9 @@ def test_FxtVMbyBR_RetainsSetupAndIsolatesTemporaryOverrides(
     assert (all((call[1] is fPars) for call in calls))
     assert (all((call[2] is ocFactory) for call in calls))
     assert (all((call[3] is virtCtlFactory) for call in calls))
-    partialFactory.assert_called_once_with(
-        target,
-        request,
-        fPars,
-        ocCLI=ocFactory,
-        virtCtlCLI=virtCtlFactory,
-    )
+    assert (vmCreate.call_args_list[0] == mock.call(
+        request, fPars, ocCLI=ocFactory, virtCtlCLI=virtCtlFactory,
+    ))
     generator.close()
     moduleBoundary.cleanupVMs.assert_called_once_with(
         bundle.vmList,
@@ -1745,7 +1670,6 @@ def test_FxtVMbyBR_DefaultSetupIsRetainedAcrossCalls(
     moduleBoundary: SimpleNamespace,
     hasRequestParam: bool,
 ) -> None:
-    partialFactory = PatchFixturePartial(monkeypatch)
     QueueFixtureConfigAndOwnership(
         moduleBoundary,
         moduleBoundary.initialConfig,
@@ -1763,7 +1687,7 @@ def test_FxtVMbyBR_DefaultSetupIsRetainedAcrossCalls(
         deque([[first], [second]]),
         deque([([first], [ownedFirst]), ([second], [ownedSecond])]),
     )
-    monkeypatch.setattr(MUT, 'VMcreateByBR', target)
+    vmCreate = PatchVMcreateByBR(monkeypatch, side_effect=target)
     ocFactory = moduleBoundary.ocFactory
     virtCtlFactory = moduleBoundary.virtCtlFactory
     moduleBoundary.cleanupResults.append(None)
@@ -1771,7 +1695,7 @@ def test_FxtVMbyBR_DefaultSetupIsRetainedAcrossCalls(
 
     generator = MUT.FxtVMbyBR.__wrapped__(request, ocFactory, virtCtlFactory)
     bundle = next(generator)
-    fPars = partialFactory.call_args.args[2]
+    fPars = vmCreate.call_args_list[0].args[1]
     assert (bundle.vmList == [first])
     assert (bundle.vmCreate() == [second])
     assert (bundle.vmList == [first, second])
@@ -1779,13 +1703,9 @@ def test_FxtVMbyBR_DefaultSetupIsRetainedAcrossCalls(
     assert (all((call[1] is fPars) for call in calls))
     assert (all((call[2] is ocFactory) for call in calls))
     assert (all((call[3] is virtCtlFactory) for call in calls))
-    partialFactory.assert_called_once_with(
-        target,
-        request,
-        fPars,
-        ocCLI=ocFactory,
-        virtCtlCLI=virtCtlFactory,
-    )
+    assert (vmCreate.call_args_list[0] == mock.call(
+        request, fPars, ocCLI=ocFactory, virtCtlCLI=virtCtlFactory,
+    ))
     generator.close()
     moduleBoundary.cleanupVMs.assert_called_once_with(
         bundle.vmList,
@@ -1798,7 +1718,6 @@ def test_FxtVMbyBR_PerCallReturnsAreAggregatedAcrossBatches(
     monkeypatch: pytest.MonkeyPatch,
     moduleBoundary: SimpleNamespace,
 ) -> None:
-    partialFactory = PatchFixturePartial(monkeypatch)
     config = moduleBoundary.configScript.Config(count=0)
     QueueFixtureConfigAndOwnership(moduleBoundary, config)
     request = SimpleNamespace(param={'fxtInf': {'brCfg': {'count': 0}}})
@@ -1818,7 +1737,7 @@ def test_FxtVMbyBR_PerCallReturnsAreAggregatedAcrossBatches(
             ([vmTwo, vmThree], [ownedTwo, ownedThree]),
         ]),
     )
-    monkeypatch.setattr(MUT, 'VMcreateByBR', target)
+    vmCreate = PatchVMcreateByBR(monkeypatch, side_effect=target)
     ocFactory = moduleBoundary.ocFactory
     virtCtlFactory = moduleBoundary.virtCtlFactory
     moduleBoundary.cleanupResults.append(None)
@@ -1836,18 +1755,14 @@ def test_FxtVMbyBR_PerCallReturnsAreAggregatedAcrossBatches(
     assert (firstBatch == [vmOne])
     assert (secondBatch == [vmTwo, vmThree])
     assert (bundle.vmList == [vmOne, vmTwo, vmThree])
-    fPars = partialFactory.call_args.args[2]
+    fPars = vmCreate.call_args_list[0].args[1]
     assert (all((call[0] is request) for call in calls))
     assert (all((call[1] is fPars) for call in calls))
     assert (all((call[2] is ocFactory) for call in calls))
     assert (all((call[3] is virtCtlFactory) for call in calls))
-    partialFactory.assert_called_once_with(
-        target,
-        request,
-        fPars,
-        ocCLI=ocFactory,
-        virtCtlCLI=virtCtlFactory,
-    )
+    assert (vmCreate.call_args_list[0] == mock.call(
+        request, fPars, ocCLI=ocFactory, virtCtlCLI=virtCtlFactory,
+    ))
     generator.close()
     moduleBoundary.cleanupVMs.assert_called_once_with(
         bundle.vmList,
@@ -1860,41 +1775,25 @@ def test_FxtVMbyBR_VMcreateAllowsCLIOverrides(
     monkeypatch: pytest.MonkeyPatch,
     moduleBoundary: SimpleNamespace,
 ) -> None:
-    partialFactory = PatchFixturePartial(monkeypatch)
     initialConfig = moduleBoundary.configScript.Config(count=0)
-    selectedConfig = moduleBoundary.configScript.Config(
-        count=1,
-        wlName='selected',
-        kCfg='/selected/kubeconfig',
-        ns='selected-ns',
-        ocCfg={'context': 'selected-context'},
-        vcCfg={'kubeconfig': '/selected-config'},
-    )
-    QueueFixtureInitialConfig(moduleBoundary, initialConfig)
-    QueueDirectConfig(moduleBoundary, selectedConfig, baseConfig=initialConfig)
+    QueueFixtureConfigAndOwnership(moduleBoundary, initialConfig)
     request = SimpleNamespace(param={'fxtInf': {'brCfg': {'count': 0}}})
-    moduleBoundary.osProxy.environ['RUN_ARTIFACTS_PATH'] = '/artifacts'
     defaultOC = mock.Mock(name='default OC client factory')
     defaultVirtCtl = mock.Mock(name='default virtctl factory')
-    oc = SimpleNamespace(name='selected OC client')
-    virtCtl = SimpleNamespace(name='selected virtctl client')
-    selectedOC = mock.Mock(return_value=oc, name='selected OC factory')
-    selectedVirtCtl = mock.Mock(
-        return_value=virtCtl,
-        name='selected virtctl factory',
-    )
+    selectedOC = mock.Mock(name='selected OC factory')
+    selectedVirtCtl = mock.Mock(name='selected virtctl factory')
     vm = mock.Mock(name='selected VM')
-    runner = MakeRunner()
-    QueueVMcreateByBRInputs(
-        moduleBoundary,
-        invocationUUID='selected-rest',
-        ocClients=[],
-        virtCtlClients=[],
-        vmObjects=[vm],
-        uidResults=[(True, '', ''), (True, 'selected-uid', '')],
-        runner=runner,
+    record = (
+        SimpleNamespace(name='selected OC client'),
+        'VirtualMachine/selected-vm-selected',
+        'selected-uid',
     )
-    moduleBoundary.excInfoResults.append((None, None, None))
+    selectedBatch = [vm]
+    calls: list[tuple[object, ...]] = []
+    target = MakeLifecycleVMcreateByBR(
+        calls, deque([[], selectedBatch]), deque([([], []), ([vm], [record])]),
+    )
+    vmCreate = PatchVMcreateByBR(monkeypatch, side_effect=target)
     moduleBoundary.cleanupResults.append(None)
     QueueExcInfo(moduleBoundary, GeneratorExit())
 
@@ -1916,30 +1815,27 @@ def test_FxtVMbyBR_VMcreateAllowsCLIOverrides(
         fxtInf={'brCfg': {'count': 1}},
     )
 
-    assert (created == [vm])
-    selectedOC.assert_called_once_with(
-        ns='selected-ns',
-        context='selected-context',
-        kubeconfig='/selected/kubeconfig',
-    )
-    selectedVirtCtl.assert_called_once_with(
-        ns='selected-ns',
-        kubeconfig='/selected/kubeconfig',
-    )
+    assert (created is selectedBatch)
     defaultOC.assert_not_called()
     defaultVirtCtl.assert_not_called()
-    fPars = partialFactory.call_args.args[2]
-    partialFactory.assert_called_once_with(
-        MUT.VMcreateByBR,
-        request,
-        fPars,
-        ocCLI=defaultOC,
-        virtCtlCLI=defaultVirtCtl,
-    )
+    fPars = vmCreate.call_args_list[0].args[1]
+    assert (vmCreate.call_args_list == [
+        mock.call(request, fPars, ocCLI=defaultOC, virtCtlCLI=defaultVirtCtl),
+        mock.call(
+            request, fPars, ocCLI=selectedOC, virtCtlCLI=selectedVirtCtl,
+            ns='selected-ns', kCfg='/selected/kubeconfig',
+            cliCfg={
+                'ocCfg': {'context': 'selected-context'},
+                'vcCfg': {'kubeconfig': '/selected-config'},
+            },
+            fxtInf={'brCfg': {'count': 1}},
+        ),
+    ])
+    assert (bundle.vmList == [vm])
     generator.close()
     moduleBoundary.cleanupVMs.assert_called_once_with(
         bundle.vmList,
-        [(oc, 'VirtualMachine/selected-vm-selected', 'selected-uid')],
+        [record],
         optsCleanUpRes={'optsDelRes': {'waitTime': '5m'}},
     )
 
@@ -1950,9 +1846,9 @@ def test_FxtVMbyBR_VMcreateRejectsInternalKeywordReplacementBeforeOperations(
     moduleBoundary: SimpleNamespace,
     argument: str,
 ) -> None:
-    partialFactory = PatchFixturePartial(monkeypatch)
+    vmCreate = PatchVMcreateByBR(monkeypatch, return_value=[])
     config = moduleBoundary.configScript.Config(count=0)
-    QueueFixtureInitialConfig(moduleBoundary, config)
+    QueueFixtureConfigAndOwnership(moduleBoundary, config)
     request = SimpleNamespace(param={'fxtInf': {'brCfg': {'count': 0}}})
     ocFactory = moduleBoundary.ocFactory
     virtCtlFactory = moduleBoundary.virtCtlFactory
@@ -1960,37 +1856,29 @@ def test_FxtVMbyBR_VMcreateRejectsInternalKeywordReplacementBeforeOperations(
 
     generator = MUT.FxtVMbyBR.__wrapped__(request, ocFactory, virtCtlFactory)
     bundle = next(generator)
-    fPars = partialFactory.call_args.args[2]
+    fPars = vmCreate.call_args_list[0].args[1]
     sharedVMs = fPars.vmList
     sharedOwnership = fPars.ownResTrk.VMs
     with pytest.raises(TypeError, match='multiple values'):
         bundle.vmCreate(**{argument: object()})
 
+    assert (vmCreate.call_args_list == [mock.call(
+        request, fPars, ocCLI=ocFactory, virtCtlCLI=virtCtlFactory,
+    )])
     assert (fPars.vmList is sharedVMs)
     assert (fPars.ownResTrk.VMs is sharedOwnership)
     assert (bundle.vmList is sharedVMs)
     assert (bundle.vmList == [])
     assert (sharedOwnership == [])
-    assert (moduleBoundary.namedDictFactory.call_count == 3)
-    moduleBoundary.getResUID.assert_not_called()
-    moduleBoundary.ocFactory.assert_not_called()
-    moduleBoundary.virtCtlFactory.assert_not_called()
+    assert (moduleBoundary.namedDictFactory.call_count == 2)
     generator.close()
     moduleBoundary.cleanupVMs.assert_not_called()
-    partialFactory.assert_called_once_with(
-        MUT.VMcreateByBR,
-        request,
-        fPars,
-        ocCLI=ocFactory,
-        virtCtlCLI=virtCtlFactory,
-    )
 
 
 def test_FxtVMbyBR_PreyieldPartialFailureCleansCreatedVMs(
     monkeypatch: pytest.MonkeyPatch,
     moduleBoundary: SimpleNamespace,
 ) -> None:
-    partialFactory = PatchFixturePartial(monkeypatch)
     config = moduleBoundary.configScript.Config(count=2)
     QueueFixtureConfigAndOwnership(moduleBoundary, config)
     request = SimpleNamespace(param={'fxtInf': {'brCfg': {'count': 2}}})
@@ -2006,7 +1894,7 @@ def test_FxtVMbyBR_PreyieldPartialFailureCleansCreatedVMs(
         deque([primary]),
         deque([([vmZero], owned)]),
     )
-    monkeypatch.setattr(MUT, 'VMcreateByBR', target)
+    vmCreate = PatchVMcreateByBR(monkeypatch, side_effect=target)
     ocFactory = moduleBoundary.ocFactory
     virtCtlFactory = moduleBoundary.virtCtlFactory
     moduleBoundary.cleanupResults.append(None)
@@ -2017,16 +1905,12 @@ def test_FxtVMbyBR_PreyieldPartialFailureCleansCreatedVMs(
         next(generator)
 
     assert (raised.value is primary)
-    fPars = partialFactory.call_args.args[2]
+    fPars = vmCreate.call_args_list[0].args[1]
     assert (fPars.vmList == [vmZero])
     assert (fPars.ownResTrk.VMs == owned)
-    partialFactory.assert_called_once_with(
-        target,
-        request,
-        fPars,
-        ocCLI=ocFactory,
-        virtCtlCLI=virtCtlFactory,
-    )
+    assert (vmCreate.call_args_list[0] == mock.call(
+        request, fPars, ocCLI=ocFactory, virtCtlCLI=virtCtlFactory,
+    ))
     assert (calls[0][0] is request)
     assert (calls[0][1] is fPars)
     assert (calls[0][2] is ocFactory)
@@ -2043,7 +1927,6 @@ def test_FxtVMbyBR_LaterPartialFailureCleansAggregateOnClose(
     monkeypatch: pytest.MonkeyPatch,
     moduleBoundary: SimpleNamespace,
 ) -> None:
-    partialFactory = PatchFixturePartial(monkeypatch)
     config = moduleBoundary.configScript.Config(count=0)
     QueueFixtureConfigAndOwnership(moduleBoundary, config)
     request = SimpleNamespace(param={'fxtInf': {'brCfg': {'count': 0}}})
@@ -2059,7 +1942,7 @@ def test_FxtVMbyBR_LaterPartialFailureCleansAggregateOnClose(
         deque([[], primary]),
         deque([([], []), ([vmZero], owned)]),
     )
-    monkeypatch.setattr(MUT, 'VMcreateByBR', target)
+    vmCreate = PatchVMcreateByBR(monkeypatch, side_effect=target)
     ocFactory = moduleBoundary.ocFactory
     virtCtlFactory = moduleBoundary.virtCtlFactory
     moduleBoundary.cleanupResults.append(None)
@@ -2067,7 +1950,7 @@ def test_FxtVMbyBR_LaterPartialFailureCleansAggregateOnClose(
 
     generator = MUT.FxtVMbyBR.__wrapped__(request, ocFactory, virtCtlFactory)
     bundle = next(generator)
-    fPars = partialFactory.call_args.args[2]
+    fPars = vmCreate.call_args_list[0].args[1]
     with pytest.raises(RuntimeError) as raised:
         bundle.vmCreate(fxtInf={'brCfg': {'count': 2}})
 
@@ -2094,7 +1977,6 @@ def test_FxtVMbyBR_SetupFailurePreservesPrimaryAndCleansOwnedVMs(
     moduleBoundary: SimpleNamespace,
     cleanupFails: bool,
 ) -> None:
-    partialFactory = PatchFixturePartial(monkeypatch)
     config = moduleBoundary.configScript.Config(count=0)
     QueueFixtureConfigAndOwnership(moduleBoundary, config)
     request = SimpleNamespace(param={'fxtInf': {'brCfg': {'count': 0}}})
@@ -2107,7 +1989,7 @@ def test_FxtVMbyBR_SetupFailurePreservesPrimaryAndCleansOwnedVMs(
         deque([primary]),
         deque([([], [owned])]),
     )
-    monkeypatch.setattr(MUT, 'VMcreateByBR', target)
+    vmCreate = PatchVMcreateByBR(monkeypatch, side_effect=target)
     ocFactory = moduleBoundary.ocFactory
     virtCtlFactory = moduleBoundary.virtCtlFactory
     moduleBoundary.cleanupResults.append(cleanup if cleanupFails else None)
@@ -2118,7 +2000,7 @@ def test_FxtVMbyBR_SetupFailurePreservesPrimaryAndCleansOwnedVMs(
         next(generator)
 
     assert (raised.value is primary)
-    fPars = partialFactory.call_args.args[2]
+    fPars = vmCreate.call_args_list[0].args[1]
     assert (fPars.vmList == [])
     assert (fPars.ownResTrk.VMs == [owned])
     moduleBoundary.cleanupVMs.assert_called_once_with(
@@ -2143,13 +2025,12 @@ def test_FxtVMbyBR_TeardownSurfacesCleanupFailureWithoutPrimary(
     teardown: str,
     cleanupFails: bool,
 ) -> None:
-    partialFactory = PatchFixturePartial(monkeypatch)
     config = moduleBoundary.configScript.Config(count=0)
     QueueFixtureConfigAndOwnership(moduleBoundary, config)
     request = SimpleNamespace(param={'fxtInf': {'brCfg': {'count': 0}}})
     calls: list[tuple[object, ...]] = []
     target = MakeLifecycleVMcreateByBR(calls, deque([[]]), deque([([], [])]))
-    monkeypatch.setattr(MUT, 'VMcreateByBR', target)
+    vmCreate = PatchVMcreateByBR(monkeypatch, side_effect=target)
     ocFactory = moduleBoundary.ocFactory
     virtCtlFactory = moduleBoundary.virtCtlFactory
     vm = SimpleNamespace(name='teardown VM')
@@ -2180,7 +2061,7 @@ def test_FxtVMbyBR_TeardownSurfacesCleanupFailureWithoutPrimary(
         finish()
         moduleBoundary.logs.error.assert_not_called()
 
-    fPars = partialFactory.call_args.args[2]
+    fPars = vmCreate.call_args_list[0].args[1]
     moduleBoundary.cleanupVMs.assert_called_once_with(
         bundle.vmList,
         fPars.ownResTrk.VMs,
@@ -2195,13 +2076,12 @@ def test_FxtVMbyBR_TestFailurePreservesPrimaryWhenCleanupFails(
     monkeypatch: pytest.MonkeyPatch,
     moduleBoundary: SimpleNamespace,
 ) -> None:
-    partialFactory = PatchFixturePartial(monkeypatch)
     config = moduleBoundary.configScript.Config(count=0)
     QueueFixtureConfigAndOwnership(moduleBoundary, config)
     request = SimpleNamespace(param={'fxtInf': {'brCfg': {'count': 0}}})
     calls: list[tuple[object, ...]] = []
     target = MakeLifecycleVMcreateByBR(calls, deque([[]]), deque([([], [])]))
-    monkeypatch.setattr(MUT, 'VMcreateByBR', target)
+    vmCreate = PatchVMcreateByBR(monkeypatch, side_effect=target)
     ocFactory = moduleBoundary.ocFactory
     virtCtlFactory = moduleBoundary.virtCtlFactory
     primary = ValueError('primary test failure')
@@ -2213,7 +2093,7 @@ def test_FxtVMbyBR_TestFailurePreservesPrimaryWhenCleanupFails(
     bundle = next(generator)
     vm = SimpleNamespace(name='body failure VM')
     bundle.vmList.append(vm)
-    fPars = partialFactory.call_args.args[2]
+    fPars = vmCreate.call_args_list[0].args[1]
     owned = (object(), 'VirtualMachine/body-failure', 'uid-body')
     fPars.ownResTrk.VMs.append(owned)
 
@@ -2242,7 +2122,6 @@ def test_FxtVMbyBR_RemovalTimeoutUsesInitialConfigAcrossFailurePaths(
     phase: str,
     cleanupFails: bool,
 ) -> None:
-    partialFactory = PatchFixturePartial(monkeypatch)
     defaultRemoval = '5m'
     expectedWait = vmRemove or defaultRemoval
     config = moduleBoundary.configScript.Config(
@@ -2282,7 +2161,7 @@ def test_FxtVMbyBR_RemovalTimeoutUsesInitialConfigAcrossFailurePaths(
         assert (laterConfig.brCfg.timeout.vmRemove == '1s')
         raise primary
 
-    monkeypatch.setattr(MUT, 'VMcreateByBR', Create)
+    vmCreate = PatchVMcreateByBR(monkeypatch, side_effect=Create)
     ocFactory = moduleBoundary.ocFactory
     virtCtlFactory = moduleBoundary.virtCtlFactory
     moduleBoundary.cleanupResults.append(secondary if cleanupFails else None)
@@ -2318,14 +2197,10 @@ def test_FxtVMbyBR_RemovalTimeoutUsesInitialConfigAcrossFailurePaths(
             with pytest.raises(StopIteration):
                 next(generator)
 
-    fPars = partialFactory.call_args.args[2]
-    partialFactory.assert_called_once_with(
-        Create,
-        request,
-        fPars,
-        ocCLI=ocFactory,
-        virtCtlCLI=virtCtlFactory,
-    )
+    fPars = vmCreate.call_args_list[0].args[1]
+    assert (vmCreate.call_args_list[0] == mock.call(
+        request, fPars, ocCLI=ocFactory, virtCtlCLI=virtCtlFactory,
+    ))
     assert (calls[0][0] is request)
     assert (calls[0][1] is fPars)
     assert (calls[0][2] is ocFactory)
@@ -2348,89 +2223,3 @@ def test_FxtVMbyBR_RemovalTimeoutUsesInitialConfigAcrossFailurePaths(
             secondary,
         )
     else: moduleBoundary.logs.error.assert_not_called()
-
-
-@pytest.mark.parametrize('cleanupFails', [False, True])
-def test_FxtVMbyBR_RunnerTimeoutReconcilesAndCleansPartialVMs(
-    monkeypatch: pytest.MonkeyPatch,
-    moduleBoundary: SimpleNamespace,
-    cleanupFails: bool,
-) -> None:
-    partialFactory = PatchFixturePartial(monkeypatch)
-    config = moduleBoundary.configScript.Config(count=2)
-    QueueFixtureInitialConfig(moduleBoundary, config)
-    request = SimpleNamespace(param={'fxtInf': {'brCfg': {'count': 2}}})
-    requestBefore = json.loads(json.dumps(request.param, default=str))
-    defaultsBefore = ConfigSnapshot(SOURCE_DEFAULT_CONFIG)
-    localEnvironment = moduleBoundary.osProxy.environ
-    localEnvironment.update({
-        'SCALE_NODES': '[\'synthetic-worker\']',
-        'RUN_ARTIFACTS_PATH': '/artifacts',
-    })
-    clients = [
-        mock.Mock(name='timeout OC zero'),
-        mock.Mock(name='timeout OC one'),
-    ]
-    runner = MakeRunner()
-    primary = TimeoutError('runner exceeded its execution budget')
-    cleanup = RuntimeError('cleanup failed')
-    runner.Call.side_effect = primary
-    QueueVMcreateByBRInputs(
-        moduleBoundary,
-        invocationUUID='timeout-rest',
-        ocClients=clients,
-        virtCtlClients=[],
-        vmObjects=[],
-        uidResults=[
-            (True, '', ''), (True, '', ''),
-            (True, 'partial-uid', ''), (True, '', ''),
-        ],
-        runner=runner,
-    )
-    QueueExcInfo(moduleBoundary, primary, primary)
-    moduleBoundary.cleanupResults.append(cleanup if cleanupFails else None)
-    ocFactory = moduleBoundary.ocFactory
-    virtCtlFactory = moduleBoundary.virtCtlFactory
-
-    generator = MUT.FxtVMbyBR.__wrapped__(request, ocFactory, virtCtlFactory)
-    with pytest.raises(TimeoutError) as raised:
-        next(generator)
-
-    assert (raised.value is primary)
-    runner.Call.assert_called_once()
-    moduleBoundary.runnerFactory.assert_called_once_with(
-        config.fxtInf.rootPath.br,
-        execTO=2400,
-    )
-    moduleBoundary.vmFactory.assert_not_called()
-    record = (clients[0], 'VirtualMachine/windows-vm-timeout-0', 'partial-uid')
-    moduleBoundary.cleanupVMs.assert_called_once_with(
-        [],
-        [record],
-        optsCleanUpRes={'optsDelRes': {'waitTime': '5m'}},
-    )
-    assert (moduleBoundary.getResUID.call_count == 4)
-    assert (moduleBoundary.ocFactory.call_count == 2)
-    assert (localEnvironment['SCALE_NODES'] == '[\'synthetic-worker\']')
-    assert (
-        json.loads(json.dumps(request.param, default=str)) == requestBefore
-    )
-    assert (ConfigSnapshot(SOURCE_DEFAULT_CONFIG) == defaultsBefore)
-    if cleanupFails:
-        moduleBoundary.logs.error.assert_any_call(
-            'Could not clean up fixture VMs: %s',
-            cleanup,
-        )
-    else:
-        assert not any(
-            (call.args[:1] == ('Could not clean up fixture VMs: %s',))
-            for call in moduleBoundary.logs.error.call_args_list
-        )
-    fPars = partialFactory.call_args.args[2]
-    partialFactory.assert_called_once_with(
-        MUT.VMcreateByBR,
-        request,
-        fPars,
-        ocCLI=ocFactory,
-        virtCtlCLI=virtCtlFactory,
-    )

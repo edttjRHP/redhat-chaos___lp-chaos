@@ -19,9 +19,8 @@ def Create(
     :param oc:
         CLI Client for target OpenShift Cluster.
     :param resCfg:
-        See `ResCfg` for details.
-        Native mode input:
-            resCfg=ResCfg(
+        Native mode input (see `ResCfg` for details):
+            ResCfg(
                 meta=NamedDict(name='<name>'),
             )
     :param ownInf:
@@ -31,7 +30,7 @@ def Create(
     :return:
         Existing or newly (re-)created resource Live Object State in a `dict`.
     '''
-    _ValResCfg(resCfg, {'name'}, set(), 'Namespace')
+    _ValResCfg(resCfg, (set(), {'name'}), (set(), set()), 'Namespace')
     if ((resYAML := resCfg.yaml) is None):
         resInput = {'subCmd': 'namespace', 'args': [resCfg.meta.name]}
     else: resInput = resYAML

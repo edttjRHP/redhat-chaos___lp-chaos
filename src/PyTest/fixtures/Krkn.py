@@ -11,7 +11,6 @@ Dependencies:
     - https://github.com/krkn-chaos/krkn-hub
 '''
 from collections.abc import Callable, Generator
-from contextlib import chdir
 import dataclasses
 from datetime import datetime, timezone
 from io import StringIO
@@ -19,11 +18,11 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Union
 
 import pytest
 
-from fixtures.libs.CommonConstant import LPQE__DEF__NAMESPACE
+from fixtures.libs.CommonModel import LPQE__DEF__FXT_CFG
 from libs.CustomTypes import NamedDict, TempEnv
 from libs.Utils.CmdExec import CmdExec
 from libs.Utils.DynLoad import RunFromPath, UpdEnv
@@ -32,17 +31,11 @@ from libs.Utils.YAML import YAMLcfg
 
 
 logs = logging.getLogger()
-_DEF__FXT_CFG = NamedDict(
-    kCfg=(
-        os.environ.get('KUBECONFIG') or
-        os.path.expanduser('~/.kube/config')
-    ),
+_DEF__FXT_CFG = LPQE__DEF__FXT_CFG | NamedDict(
     # The `--kubeconfig` option will be overridden by the above `.kCfg`.
     cliCfg=NamedDict(
-        ocCfg={},
         vcCfg={},
     ),
-    ns=LPQE__DEF__NAMESPACE,
     fxtInf=NamedDict(
         rootPath=NamedDict(
             krkn=Path(os.getenv(
@@ -54,7 +47,7 @@ _DEF__FXT_CFG = NamedDict(
                     f'{Path(__file__).resolve().parent.parent}/'
                     'vendor/krkn'
                 ),
-            )),
+            )).resolve(),
             krknHub=Path(os.getenv(
                 (
                     'IENG_PYTEST____FXT__KRKN____'
@@ -64,13 +57,13 @@ _DEF__FXT_CFG = NamedDict(
                     f'{Path(__file__).resolve().parent.parent}/'
                     'vendor/krknHub'
                 ),
-            )),
+            )).resolve(),
         ),
         krknCfg=NamedDict(
             krknEnv={
                 'ENABLE_ES':    'False',
                 'ES_SERVER':    'http://0.0.0.0',
-                'ES_PORT':      'ES_PORT:=443',
+                'ES_PORT':      '443',
             },
         ),
     ),
@@ -91,11 +84,11 @@ class FxtObjKrkn:
     Can be sub-classed to add fields. Sub-classes must also be decorated with
     `@dataclass(frozen=True)`.
     '''
-    krknHub: 'KrknHub'
-    fxtInf: NamedDict
-    testPars: NamedDict
     cli: NamedDict
     ns: str
+    fxtInf: NamedDict
+    testPars: NamedDict
+    krknHub: 'KrknHub'
 
 
 class KrknHub:
@@ -133,16 +126,64 @@ class KrknHub:
 
         Mimic KrknHub Scenario runner (`run.sh`):
           - Apply configured `krknEnv`.
-          - Source KrknHub main `env.sh` then Scenario `env.sh`.
-          - Render Krkn Scenario and Conf. from their templates.
+          - Source KrknHub main `env.sh`, `common_run.sh`, then Scenario
+            `env.sh`.
           - Execute the Scenario `prep.sh` if present.
+          - Render Krkn Scenario (unless `${SCENARIO_FILE}` exists) and Conf.
+            from their templates. An empty template renders nothing.
           - Prepare CLI arguments and execute the Krkn runner.
         The `prep.sh` is executed directly, so it must be executable with a
         valid she-bang. A failed preparation stops the run.
 
+        This MUST be synchronized with KrknHub Scenario runner!!! See:
+        https://github.com/krkn-chaos/krkn-hub/blob/main/README.md#reusable-scenario-runner-conventions
+        for details. Current skeleton model:
+        ```bash
+        #!/bin/bash
+        export ROOT_FOLDER="${ROOT_FOLDER:-/home/krkn}"
+        export KRAKEN_FOLDER="${KRAKEN_FOLDER:-$ROOT_FOLDER/kraken}"
+
+        # Source env.sh to read all the vars
+        source "$ROOT_FOLDER/main_env.sh"
+        source "$ROOT_FOLDER/common_run.sh"
+        source "$ROOT_FOLDER/env.sh"
+        export SCENARIO_PATH="$(resolve_scenario_path "$SCENARIO_FILE" "$KRAKEN_FOLDER/scenario")"
+        export SCENARIO_FILE="${SCENARIO_PATH}"
+        CONFIG_FILE="$KRAKEN_FOLDER/config/<scenarioCfgName>.yaml"
+
+        if [[ $KRKN_DEBUG == "True" ]];then
+          set -ex
+        fi
+
+        checks
+        [ -f "$ROOT_FOLDER/prep.sh" ] && "$ROOT_FOLDER/prep.sh"
+
+        # Render Scenario and Config files
+        [ -f "$SCENARIO_PATH" ] || envsubst < "$ROOT_FOLDER/SCENARIO_TEMPLATE_FILE" > "$SCENARIO_PATH"
+        envsubst < "$ROOT_FOLDER/CONFIG_FILE_TEMPLATE" > "$CONFIG_FILE"
+
+        # Run Kraken
+        cd "$KRAKEN_FOLDER"
+        extra_var=""
+        if [[ $KRKN_DEBUG == "True" ]];then
+          cat "$SCENARIO_PATH"
+          cat "$CONFIG_FILE"
+          extra_var="--debug True"
+        fi
+
+        python3.11 run_kraken.py --config="$CONFIG_FILE" $extra_var
+        ```
+        NOTE:
+          - The `ROOT_FOLDER` is where KrknHub selected scenario files are
+            located for Container Execution model. Roughtly equivalent with
+            `Path(kHubRoot / scnName)` for this integration model. Some files
+            under `kHubRoot` end up there in Container Execution model, but all
+            of those files are consumed by `run.sh`. As long as this stay true,
+            it doesn't pose an issue for this integration model.
+
         Inject chaos into the CUT using the selected KrknHub Scenario model.
         Supply scenario targeting, recovery assertions, and cleanup in the
-        test. See `docs/guide--krkn.md` for prerequisites and artifact
+        test. See `docs/guide--Krkn.md` for prerequisites and artifact
         retention.
 
         Relative runtime directory roots resolve from the caller's working
@@ -193,12 +234,6 @@ class KrknHub:
         )
 
         with TempEnv():
-            UpdEnv({
-                **fxtCfg.fxtInf.krknCfg.krknEnv,
-                'KRKN_KUBE_CONFIG': fxtCfg.kCfg,
-            })
-            DoShellSource(envFiles=[kHubRoot / 'env.sh', scnDir / 'env.sh'])
-
 #           Krkn configuration items that referencing file or dir. have
 #           different path resolution algorithm (in `krkn-hub`, each item's
 #           value is controlled by an Env. Var.). The configuration paths
@@ -234,49 +269,65 @@ class KrknHub:
             )).resolve() / (
                 f'{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}--{scnName}'
             )).mkdir(parents=True, exist_ok=False)
+
             UpdEnv({
-                envVar: (root / os.environ[envVar]).resolve()
-                for (root, envVar) in (
+                **{
+                    eVar: os.getenv(eVar, dVal)
+                    for (eVar, dVal) in (
+                        # Env. Var. that has abs. path as it default value.
+                        ('ROLLBACK_VERSIONS_DIRECTORY', 'krkn--rollback'),
+                        ('TELEMETRY_ARCHIVE_PATH', 'krkn--telemetry'),
+                    )
+                },
+                **fxtCfg.fxtInf.krknCfg.krknEnv,
+                'KRKN_KUBE_CONFIG': fxtCfg.kCfg,
+                'KRAKEN_FOLDER': krknRoot,
+                'ROOT_FOLDER': scnDir,
+            })
+            DoShellSource(envFiles=[
+                kHubRoot / 'env.sh',
+                kHubRoot / 'common_run.sh',
+                scnDir / 'env.sh',
+            ])
+
+            # NOTE: the Krkn runtime CWD will be `runDir`.
+            UpdEnv({
+                eVar: (rPath / os.environ[eVar]).resolve()
+                for (rPath, eVarLst) in (
+                    # The following Env. Var. (default values are rel. path) by
+                    #   default use the model under `krknRoot`.
+                    # Unless pointing to other model under `krknHub`, if any,
+                    #   set to abs. path to override.
                     (krknRoot, (
-                        'ALERTS_PATH', 'METRICS_PATH', 'RESILIENCY_FILE',
+                        # Set (with default) in KrknHub main `env.sh`.
+                        'ALERTS_PATH',
+                        'METRICS_PATH',
+                        'RESILIENCY_FILE',
                     )),
+                    # If set to rel. path, it's towards Krkn runtime CWD.
                     (runDir, (
-                        'SCENARIO_FILE', 'ROLLBACK_VERSIONS_DIRECTORY',
+                        # Set (with default) in KrknHub main `env.sh`.
+                        'KRKN_KUBE_CONFIG',
+                        'ROLLBACK_VERSIONS_DIRECTORY',
                         'TELEMETRY_ARCHIVE_PATH',
                     )),
+                    ((runDir / 'scenarios'), (
+                        # Set in Scenario `env.sh`.
+                        'SCENARIO_FILE',
+                    )),
                 )
-                for envVar in envVar if os.environ.get(envVar)
+                for eVar in eVarLst if os.getenv(eVar)
             })
-            cfgTmpl = (
-                kHubRoot / os.environ['KRKN_HUB__TEMPLATE__CFG__FN']
-            ).resolve()
-            scnTmpl = (
-                scnDir / os.environ['KRKN_HUB__TEMPL__SCN__FN']
-            ).resolve()
+            os.environ['SCENARIO_PATH'] = os.environ['SCENARIO_FILE']
+            scnFile = Path(os.environ['SCENARIO_PATH'])
             cfgFile = (runDir / 'config/chaos.yaml').resolve()
-            scnFile = Path(os.environ['SCENARIO_FILE'])
             for dir in (cfgFile.parent, scnFile.parent, *(
-                Path(os.environ[envVar])
-                for envVar in (
+                Path(os.environ[eVar])
+                for eVar in (
                     'ROLLBACK_VERSIONS_DIRECTORY', 'TELEMETRY_ARCHIVE_PATH',
-                ) if os.environ.get(envVar)
+                ) if os.getenv(eVar)
             )):
                 dir.mkdir(parents=True, exist_ok=True)
-            for (tmpl, output) in (
-                (scnTmpl.read_bytes(), scnFile),
-                (cfgTmpl.read_bytes(), cfgFile),
-            ):
-                result = CmdExec().Run(
-                    ['envsubst'],
-                    input=tmpl,
-                    spPars={'text': False},
-                )
-                if not result.success:
-                    raise RuntimeError(
-                        f'The `envsubst` failed ({result.exitStat}): '
-                        f'{result.stderr}'
-                    )
-                output.write_bytes(result.stdout)
 
             if (scnDir / 'prep.sh').is_file():
                 result = CmdExec().Run([str(scnDir / 'prep.sh')])
@@ -286,20 +337,58 @@ class KrknHub:
                         f'{result.stderr}'
                     )
 
+            (scnTmpl, cfgTmpl) = (
+                (rPath / os.environ[eVar]).resolve()
+                for (rPath, eVar) in (
+                    # Set in Scenario `env.sh`.
+                    (scnDir, 'SCENARIO_TEMPLATE_FILE'),
+                    # Set (with default) in KrknHub main `env.sh`.
+                    (kHubRoot, 'CONFIG_FILE_TEMPLATE'),
+                )
+            )
+            if scnFile.is_file(): scnTmpl = Path(os.devnull)
+            for (tmpl, output) in (
+                (scnTmpl.read_bytes(), scnFile),
+                (cfgTmpl.read_bytes(), cfgFile),
+            ):
+                if tmpl:
+                    result = CmdExec().Run(
+                        ['envsubst'],
+                        input=tmpl,
+                        spPars={'text': False},
+                    )
+                    if not result.success:
+                        raise RuntimeError(
+                            f'The `envsubst` failed ({result.exitStat}): '
+                            f'{result.stderr}'
+                        )
+                    output.write_bytes(result.stdout)
+
             # Prepare Krkn CLI arguments.
             krknArgs = [f'--config={cfgFile}']
-            if (os.environ.get('KRKN_DEBUG') == 'True'):
+            if (os.getenv('KRKN_DEBUG') == 'True'):
+                # Use a 20-backtick fence to allow nested Markdown code blocks
+                #   within the logged content with minimal collision risk.
+                mdFence = '`' * 20
+                for (desc, path) in (
+                    ('Krkn Config', cfgFile),
+                    ('Krkn Scenario', scnFile),
+                ):
+                    logs.info(
+                        f'{desc} (`{path}`):\n{mdFence}yaml\n'
+                        f'{path.read_text().rstrip()}\n{mdFence}'
+                    )
                 krknArgs.extend(['--debug', 'True'])
 
-            # Execute Krkn.
-            with chdir(runDir):
-                return RunFromPath(
-                    krknRun,
-                    krknArgs,
-                    (envVars or {}),
-                    initGlb,
-                    runName,
-                )
+            # Execute Krkn in `runDir`.
+            return RunFromPath(
+                krknRun,
+                krknArgs,
+                runDir,
+                (envVars or {}),
+                initGlb,
+                runName,
+            )
 
 
 @pytest.fixture(name='fxtKrkn', scope='function')
@@ -317,7 +406,7 @@ def FxtKrkn(
     Bash Shell Script block).
 
     This is the complete Fixture Configuration reference (see
-    `docs/guide--krkn.md` for concise usage).
+    `docs/guide--Krkn.md` for concise usage).
     Configure via indirect parametrize with `dict` and nested `NamedDict`:
         @pytest.mark.parametrize(
             'fxtKrkn,',
@@ -353,6 +442,13 @@ def FxtKrkn(
                     `IENG_PYTEST____FXT__KRKN____DEF_FXT_CFG__ROOTPATH_KRKNHUB`
                     Env. Var. value (default:
                     `'<PyTestRoot>/vendor/krknHub'`)).
+                NOTE:
+                  - A rel. path as value of the above Env. Var. will be
+                    resolved against CWD during construction of
+                    `_DEF__FXT_CFG`.
+                  - If overridden (via, i.e. `@pytest.mark.parametrize` or any
+                    function call that allow overiding) with rel. path, it will
+                    be resolved against CWD at the time it is used.
               - krknCfg:
                 Krkn configurations.
                   - krknEnv:    Initial seed of Env. Var.
@@ -360,7 +456,7 @@ def FxtKrkn(
             Parameters to be passed to test (default: `NamedDict()`).
 
     Provide a KrknHub runner to inject chaos into the CUT for one test. See
-    `docs/guide--krkn.md` for usage and safety.
+    `docs/guide--Krkn.md` for usage and safety.
 
     Call `krknHub.Run(scnName)` to render and execute the selected KrknHub
     Scenario model.
@@ -369,15 +465,15 @@ def FxtKrkn(
 
     :yield:
         A `FxtObjKrkn` where:
-          - krknHub:    A `KrknHub` instance.
-          - fxtInf:     The resolved fixture settings `NamedDict` (see Fixture
-                        Configuration for details).
-          - testPars:   A `NamedDict` of test-specific parameters.
           - cli:
             A `NamedDict` with:
               - oc:         A `OCcli` instance.
               - virtCtl:    A `VirtCtlCLI` instance.
           - ns:         Kubernetes Namespace.
+          - fxtInf:     The resolved fixture settings `NamedDict` (see Fixture
+                        Configuration for details).
+          - testPars:   A `NamedDict` of test-specific parameters.
+          - krknHub:    A `KrknHub` instance.
     '''
     fxtOpts = NamedDict.FromDict(YAMLcfg.ToDict(Path(os.getenv(
         'IENG_PYTEST____FXT__KRKN____OPTS',
@@ -403,9 +499,6 @@ def FxtKrkn(
     )
 
     yield FxtObjKrkn(
-        krknHub=KrknHub(request, InstParsKrknHub(fxtCfgObj=fxtCfg)),
-        fxtInf=fxtCfg.fxtInf,
-        testPars=fxtCfg.testPars,
         cli=NamedDict(
             oc=fxtOCcli(
                 ns=fxtCfg.ns,
@@ -417,6 +510,9 @@ def FxtKrkn(
             ),
         ),
         ns=fxtCfg.ns,
+        fxtInf=fxtCfg.fxtInf,
+        testPars=fxtCfg.testPars,
+        krknHub=KrknHub(request, InstParsKrknHub(fxtCfgObj=fxtCfg)),
     )
 
     logs.info('The `fxtKrkn` fixture teardown complete.')

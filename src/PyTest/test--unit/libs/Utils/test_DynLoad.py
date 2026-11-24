@@ -305,7 +305,7 @@ def test_ImportFromPath_RejectsMissingSpecOrLoader(
     importer.util.module_from_spec.assert_not_called()
 
 
-def test_RunFromPath_PassesArgumentsAndRestoresArgv(
+def test_RunFromPath_PassesArgumentsAndRestoresArgvAndPath(
     monkeypatch: pytest.MonkeyPatch,
     moduleState: mock.MagicMock,
 ) -> None:
@@ -314,6 +314,11 @@ def test_RunFromPath_PassesArgumentsAndRestoresArgv(
         ('/', 'synthetic', 'entry.py'),
         pathText='/synthetic/entry.py',
     )
+    path.parent.__str__.return_value = '/synthetic'
+    # Without `workDir`, the script path is joined to the caller CWD (`.`).
+    base = mock.MagicMock()
+    base.__truediv__.return_value = path
+    pathFactory.return_value = base
     tempEnv = mock.MagicMock()
     tempEnvFactory = mock.Mock(return_value=tempEnv)
     updateEnv = mock.Mock()
@@ -327,6 +332,7 @@ def test_RunFromPath_PassesArgumentsAndRestoresArgv(
         run_name: str,
     ) -> dict:
         observed['argv'] = list(moduleState.argv)
+        observed['path'] = list(moduleState.path)
         return result
 
     runpy.run_path.side_effect = CaptureRunPath
@@ -336,15 +342,28 @@ def test_RunFromPath_PassesArgumentsAndRestoresArgv(
     envVars = {'UNIT_DYN_REMOVE': None, 'UNIT_DYN_VALUE': 7}
     initGlobals = {'injected': 'safe-global'}
     beforeArgs = moduleState.argv
+    beforePath = moduleState.path
+    chdir = mock.Mock()
+    monkeypatch.setattr(MUT, 'chdir', chdir)
+    nullContext = mock.MagicMock()
+    monkeypatch.setattr(MUT, 'nullcontext', nullContext)
 
     runResult = MUT.RunFromPath(
-        'entry.py', [42, 'tail'], envVars, initGlobals,
+        'entry.py', [42, 'tail'], None, envVars, initGlobals,
     )
 
     assert (runResult is result)
     assert (observed['argv'] == ['/synthetic/entry.py', '42', 'tail'])
     assert (moduleState.argv is beforeArgs)
-    pathFactory.assert_called_once_with('entry.py')
+    # The script directory leads `sys.path` only while the script runs.
+    assert (observed['path'] == ['/synthetic', '/synthetic/import-path'])
+    assert (moduleState.path is beforePath)
+    assert (moduleState.path == ['/synthetic/import-path'])
+    # Without `workDir`, the working directory is left alone.
+    chdir.assert_not_called()
+    nullContext.assert_called_once_with()
+    pathFactory.assert_called_once_with('.')
+    base.__truediv__.assert_called_once_with('entry.py')
     path.resolve.assert_called_once_with()
     path.is_file.assert_called_once_with()
     tempEnvFactory.assert_called_once_with()
@@ -359,6 +378,7 @@ def test_RunFromPath_PassesArgumentsAndRestoresArgv(
 
 def test_RunFromPath_RejectsMissingFile(
     monkeypatch: pytest.MonkeyPatch,
+    moduleState: mock.MagicMock,
 ) -> None:
     (pathFactory, path, _) = PreparePath(
         monkeypatch,
@@ -366,6 +386,9 @@ def test_RunFromPath_RejectsMissingFile(
         fileExists=False,
         pathText='/synthetic/absent.py',
     )
+    base = mock.MagicMock()
+    base.__truediv__.return_value = path
+    pathFactory.return_value = base
     tempEnvFactory = mock.Mock()
     updateEnv = mock.Mock()
     runpy = mock.Mock()
@@ -376,11 +399,13 @@ def test_RunFromPath_RejectsMissingFile(
     with pytest.raises(FileNotFoundError, match='Target script'):
         MUT.RunFromPath('absent.py')
 
-    pathFactory.assert_called_once_with('absent.py')
+    pathFactory.assert_called_once_with('.')
+    base.__truediv__.assert_called_once_with('absent.py')
     path.is_file.assert_called_once_with()
     tempEnvFactory.assert_not_called()
     updateEnv.assert_not_called()
     runpy.run_path.assert_not_called()
+    assert (moduleState.path == ['/synthetic/import-path'])
 
 
 def test_UpdEnv_EmptyUpdatesLeaveEnvironmentUnchanged(
@@ -441,3 +466,140 @@ def test_UpdEnv_PreservesConversionErrorAndEarlierUpdates(
     assert (environment['UNIT_UPD_FIRST'] == 'temporary')
     assert (environment['UNIT_UPD_EXISTING'] == 'original')
     assert ('UNIT_UPD_BAD' not in environment)
+
+
+@pytest.mark.parametrize('outcome', ['return', 'exit', 'raise'])
+@pytest.mark.parametrize('workDir', [None, 'work', '/synthetic/work'])
+def test_RunFromPath_ScopesScriptStateToRunAndRestoresItOnEveryOutcome(
+    monkeypatch: pytest.MonkeyPatch,
+    moduleState: mock.MagicMock,
+    workDir: str | None,
+    outcome: str,
+) -> None:
+    (pathFactory, path, _) = PreparePath(
+        monkeypatch,
+        ('/', 'synthetic', 'entry.py'),
+        pathText='/synthetic/entry.py',
+    )
+    path.parent.__str__.return_value = '/synthetic'
+    base = mock.MagicMock()
+    base.__truediv__.return_value = path
+    pathFactory.return_value = base
+    tempEnv = mock.MagicMock()
+    updateEnv = mock.Mock()
+    # The script runs in `workDir` if given, else in the caller CWD.
+    dirContext = mock.MagicMock()
+    chdir = mock.Mock(return_value=dirContext)
+    nullContext = mock.Mock(return_value=dirContext)
+    runpy = mock.Mock()
+    result = {'observed': 'synthetic'}
+    error = {
+        'return': None, 'exit': SystemExit(3),
+        'raise': RuntimeError('synthetic script failure'),
+    }[outcome]
+    observed = {}
+
+    def CaptureRunPath(
+        scriptPath: str,
+        init_globals: dict,
+        run_name: str,
+    ) -> dict:
+        observed['argv'] = list(moduleState.argv)
+        observed['path'] = list(moduleState.path)
+        observed['envUpdates'] = list(updateEnv.call_args_list)
+        observed['contexts'] = [
+            (context.__enter__.call_count, context.__exit__.call_count)
+            for context in (tempEnv, dirContext)
+        ]
+        # Script changes to the replaced lists must not reach the caller.
+        moduleState.argv.append('polluted-by-script')
+        moduleState.path.append('/polluted/by/script')
+        if (error is not None): raise error
+        return result
+
+    runpy.run_path.side_effect = CaptureRunPath
+    monkeypatch.setattr(MUT, 'TempEnv', mock.Mock(return_value=tempEnv))
+    monkeypatch.setattr(MUT, 'UpdEnv', updateEnv)
+    monkeypatch.setattr(MUT, 'chdir', chdir)
+    monkeypatch.setattr(MUT, 'nullcontext', nullContext)
+    monkeypatch.setattr(MUT, 'runpy', runpy)
+    initGlobals = {'injected': 'safe-global'}
+    beforeArgs = moduleState.argv
+    beforePath = moduleState.path
+    runArgs = (
+        'entry.py', ['first', 2], workDir, None, initGlobals, 'synthetic_run',
+    )
+
+    if (error is None): assert (MUT.RunFromPath(*runArgs) is result)
+    else:
+        with pytest.raises(type(error)) as raised:
+            MUT.RunFromPath(*runArgs)
+        assert (raised.value is error)
+
+    # Like `python <script>`, while the script runs `sys.argv` holds it and
+    #   its arguments, and its directory leads `sys.path`.
+    assert (observed['argv'] == ['/synthetic/entry.py', 'first', '2'])
+    assert (observed['path'] == ['/synthetic', '/synthetic/import-path'])
+    # The environment updates and the directory apply only during the run.
+    assert (observed['envUpdates'] == [mock.call({})])
+    assert (observed['contexts'] == [(1, 0), (1, 0)])
+    tempEnv.__exit__.assert_called_once()
+    dirContext.__exit__.assert_called_once()
+    # The original objects are restored without the script changes.
+    assert (moduleState.argv is beforeArgs)
+    assert (moduleState.argv == ['original-script', 'original-argument'])
+    assert (moduleState.path is beforePath)
+    assert (moduleState.path == ['/synthetic/import-path'])
+    # A relative script path is joined to `workDir` if given, else to `.`.
+    pathFactory.assert_called_once_with((workDir or '.'))
+    base.__truediv__.assert_called_once_with('entry.py')
+    if (workDir is None):
+        nullContext.assert_called_once_with()
+        chdir.assert_not_called()
+    else:
+        chdir.assert_called_once_with(workDir)
+        nullContext.assert_not_called()
+    runpy.run_path.assert_called_once_with(
+        '/synthetic/entry.py', init_globals=initGlobals,
+        run_name='synthetic_run',
+    )
+
+
+def test_RunFromPath_PropagatesWorkDirErrorAndRestoresState(
+    monkeypatch: pytest.MonkeyPatch,
+    moduleState: mock.MagicMock,
+) -> None:
+    (pathFactory, path, _) = PreparePath(
+        monkeypatch,
+        ('/', 'synthetic', 'entry.py'),
+        pathText='/synthetic/entry.py',
+    )
+    path.parent.__str__.return_value = '/synthetic'
+    base = mock.MagicMock()
+    base.__truediv__.return_value = path
+    pathFactory.return_value = base
+    tempEnv = mock.MagicMock()
+    # Entering an invalid `workDir` fails before the script runs.
+    error = NotADirectoryError('synthetic work directory')
+    chdir = mock.MagicMock()
+    chdir.return_value.__enter__.side_effect = error
+    runpy = mock.Mock()
+    monkeypatch.setattr(MUT, 'TempEnv', mock.Mock(return_value=tempEnv))
+    monkeypatch.setattr(MUT, 'UpdEnv', mock.Mock())
+    monkeypatch.setattr(MUT, 'chdir', chdir)
+    monkeypatch.setattr(MUT, 'runpy', runpy)
+    beforeArgs = moduleState.argv
+    beforePath = moduleState.path
+
+    with pytest.raises(NotADirectoryError) as raised:
+        MUT.RunFromPath('entry.py', ['first'], 'work')
+
+    assert (raised.value is error)
+    chdir.assert_called_once_with('work')
+    # The script never ran and every scoped state change was undone.
+    runpy.run_path.assert_not_called()
+    tempEnv.__exit__.assert_called_once()
+    assert (moduleState.argv is beforeArgs)
+    assert (moduleState.argv == ['original-script', 'original-argument'])
+    assert (moduleState.path is beforePath)
+    assert (moduleState.path == ['/synthetic/import-path'])

@@ -1,4 +1,5 @@
 '''Dynamic Loading functions.'''
+from contextlib import chdir, nullcontext
 from pathlib import Path
 import importlib.util
 import runpy
@@ -69,15 +70,33 @@ def ImportFromPath(modPath: Union[str, Path]) -> ModuleType:
 def RunFromPath(
     scrPath: Union[str, Path],
     scrArgs: Optional[list[str]] = None,
-    envVars: dict[str, Any] = None,
-    initGlb: dict[str, Any] = None,
+    workDir: Optional[Union[str, Path]] = None,
+    envVars: Optional[dict[str, Any]] = None,
+    initGlb: Optional[dict[str, Any]] = None,
     runName: str = '__main__',
 ) -> dict[str, Any]:
     '''
-    Executes a standalone `.py` script in-process without modifying `sys.path`.
+    Executes a standalone `.py` script in-process.
+
+    As with `python <scrPath>`, while it runs the resolved script directory
+    leads `sys.path` (so the script can import its sibling modules) and
+    `sys.argv` holds the script path and arguments. Both original objects are
+    restored afterwards, also on `SystemExit` or another exception, discarding
+    the script changes to them.
+
+    If `workDir` is given, the script then runs in that directory, and the
+    caller's working directory is likewise restored afterwards.
+
+    Unlike a new interpreter, the process state (e.g. `sys.modules`, including
+    modules imported by the script) is shared, and the working directory is
+    process-wide, i.e. other threads see `workDir` while the script runs.
 
     :param scrPath: Path to the `.py` script (`Path` object or `str`).
     :param scrArgs: A `list` containing script's arguments.
+    :param workDir:
+        Working directory to run the script in (`Path` object or `str`,
+        relative to the caller's working directory). Set to `None` (default)
+        to keep the current working directory.
     :param envVars:
         A `dict` containing Env. Variables to bet set or removed (set the value
         to `None`) in the execution context.
@@ -92,12 +111,16 @@ def RunFromPath(
 
     :raises FileNotFoundError:
         If the specified `scrPath` does not exist.
+    :raises OSError:
+        If `workDir` cannot be entered (e.g. missing or not a directory).
     '''
-    path = Path(scrPath).resolve()
+    path = (Path(workDir if workDir else '.') / scrPath).resolve()
     if not path.is_file():
         raise FileNotFoundError(f'Target script does not exist: {path}')
 
     # Executes the file as a script and returns its resulting global namespace.
+    #   Like `python <scrPath>`, the script directory leads `sys.path`. The
+    #   `workDir` is entered last, after the script path is resolved.
     with (
         TempEnv(),
         patch.object(
@@ -105,6 +128,8 @@ def RunFromPath(
             'argv',
             [str(path), *[str(arg) for arg in (scrArgs or [])]],
         ),
+        patch.object(sys, 'path', [str(path.parent), *sys.path]),
+        (nullcontext() if (workDir is None) else chdir(workDir)),
     ):
         UpdEnv(envVars or {})
         return runpy.run_path(

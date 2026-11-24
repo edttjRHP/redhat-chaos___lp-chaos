@@ -16,7 +16,7 @@ from uuid import uuid4
 
 import pytest
 
-from fixtures.libs.CommonConstant import LPQE__DEF__NAMESPACE
+from fixtures.libs.CommonModel import LPQE__DEF__FXT_CFG
 from fixtures.VM import FxtObjVM
 from libs.CustomTypes import NamedDict
 from libs.OpenShift.LP.Virt.VM.VM import VM
@@ -25,17 +25,11 @@ from libs.Utils.LibInVenv import ModInVenv
 
 
 logs = logging.getLogger()
-_DEF__FXT_CFG = NamedDict(
-    kCfg=(
-        os.getenv('KUBECONFIG') or
-        os.path.expanduser('~/.kube/config')
-    ),
+_DEF__FXT_CFG = LPQE__DEF__FXT_CFG | NamedDict(
     # The `--kubeconfig` option will be overridden by the above `.kCfg`.
     cliCfg=NamedDict(
-        ocCfg={},
         vcCfg={},
     ),
-    ns=LPQE__DEF__NAMESPACE,
     fxtInf=NamedDict(
         rootPath=NamedDict(
             br=Path(os.getenv(

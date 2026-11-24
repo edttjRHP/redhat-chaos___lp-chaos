@@ -78,6 +78,93 @@ unchanged. Plain dictionaries cannot override existing non-null `NamedDict` sect
 existing value with `None`.
 
 
+## Develop a Fixture
+
+When a fixture yields a callable directly or binds setup values with `functools.partial` before yielding it, keep the callable's signature short and stable:
+  - **Frozen parameter dataclass.** Bind persistent setup values, such as the merged Fixture Configuration and shared lists, positionally as one
+    `@dataclasses.dataclass(frozen=True)` parameter (`FuncPars<Name>`). Add optional fields with defaults (`default_factory` for mutable values), so existing
+    constructions and calls keep working without a signature change. Frozen blocks field reassignment, not mutation of field contents, such as appending to a
+    shared list.
+  - **Keyword-only dependencies.** Declare injected fixtures and factories after `*` and bind them by name. Name them distinctly from Fixture Configuration
+    keys, as a call keyword with the same name replaces the bound dependency instead of reaching `**fxtCfgArgs`.
+  - **Use `request` as context.** Bind the fixture's own PyTest `request` (it has the fixture's scope) positionally for context, such as
+    `request.config.rootpath`. It is not an override, as the fixture SHOULD merges `request.param` into `fxtCfgObj` once at setup, so do not merge it again in
+    the callable (list merges are not idempotent).
+  - **Per-call overrides.** Accept `**fxtCfgArgs` and merge them as `fPars.fxtCfgObj | NamedDict(fxtCfgArgs)`. Call values are the right-hand operand: at
+    matching keys, sections recurse, lists append, and other values replace those in `fxtCfgObj` (see
+    [NamedDict Merge API Reference](#nameddict-merge-api-reference)). Only the top level is converted, so pass nested schema sections as `NamedDict`. The merge
+    leaves `fxtCfgObj` unchanged, so overrides apply to that call only. Unmerged nested values remain shared with `fxtCfgObj`, so in-place changes to them
+    persist across calls.
+  - **Typed frozen Fixture Object.** Yield a `@dataclasses.dataclass(frozen=True)` Fixture Object (`FxtObj<Name>`) with typed fields, including the callable. A
+    sub-class that adds fields must also be decorated with `@dataclasses.dataclass(frozen=True)`.
+
+Bundle setup values in `FuncParsFooBar` so you can add fields with defaults without changing the `FooBar` signature or existing calls. Bind `request` for
+PyTest context and use `**fxtCfgArgs` for per-call configuration overrides.
+
+A minimal, non-operational sketch:
+```python
+from collections.abc import Callable, Generator
+import dataclasses
+import functools
+from typing import Any
+
+import pytest
+
+from fixtures.libs.CommonConstant import LPQE__DEF__NAMESPACE
+from libs.CustomTypes import NamedDict
+
+
+_DEF__FXT_CFG = NamedDict(ns=LPQE__DEF__NAMESPACE, testPars=NamedDict())
+
+
+@dataclasses.dataclass(frozen=True)
+class FuncParsFooBar:
+    fxtCfgObj: NamedDict
+    # Add new fields with defaults so existing callers keep working.
+    results: list[NamedDict] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass(frozen=True)
+class FxtObjFXT:
+    fooBar: Callable[..., NamedDict]
+    results: list[NamedDict]
+
+
+def FooBar(
+    request: Any,
+    fPars: FuncParsFooBar,
+    *,
+    ocCLI: Callable[..., Any],
+    **fxtCfgArgs: Any,
+) -> NamedDict:
+    fxtCfg = fPars.fxtCfgObj | NamedDict(fxtCfgArgs)
+    result = NamedDict(rootPath=request.config.rootpath, fxtCfg=fxtCfg)
+    fPars.results.append(result)
+    return result
+
+
+@pytest.fixture(name='fxtFXT', scope='module')
+def FxtFXT(
+    request: Any,
+    fxtOCcli: Callable[..., Any],
+) -> Generator[FxtObjFXT, None, None]:
+    fxtCfg = _DEF__FXT_CFG | NamedDict(**getattr(request, 'param', {}))
+    results = []
+    yield FxtObjFXT(
+        fooBar=functools.partial(
+            FooBar,
+            request,
+            FuncParsFooBar(fxtCfgObj=fxtCfg, results=results),
+            ocCLI=fxtOCcli,
+        ),
+        results=results,
+    )
+```
+
+For example, a test calls `fxtFXT.fooBar(ns='my-test', testPars=NamedDict(tag='a'))`. Adding a defaulted `FuncParsFooBar` field later leaves that call and
+the `FooBar` signature unchanged.
+
+
 ## Test Locations
 
 Use `test--unit/` for isolated Python-module tests, `test--contract/` for offline template contracts, and `test--suites/` for live CUT scenarios.
@@ -116,7 +203,7 @@ python -m pytest -c pytest--contract.ini
 ### Live Test Suites
 
 Put live CUT scenarios under `test--suites/` (examples are in `test--suites/ts--example/`). The root [`conftest.py`](conftest.py) registers the
-[fixtures](#choose-a-fixture). Use indirect parametrization for configuration and normal assertions for outcomes.
+[Fixtures](#choose-a-fixture). Use indirect parametrization for configuration and normal assertions for outcomes.
 
 Markers in the `ts--example/`:
   - `vm`: A [Direct VM example](test--suites/ts--example/test_VM.py) creates a VM and asserts a guest PowerShell response.
@@ -138,7 +225,7 @@ Only remove `--collect-only` on an authorized, disposable CUT after reviewing th
 
 #### Choose a Fixture
 
-Use these fixtures to provision VMs, communicate with their guests, and inject chaos into a Cluster Under Test (CUT).
+Use these Fixtures to provision VMs, communicate with their guests, and inject chaos into a Cluster Under Test (CUT).
 
 | Fixture       | Purpose                                                                                       | Lifetime      |
 |---------------|-----------------------------------------------------------------------------------------------|---------------|
@@ -146,9 +233,9 @@ Use these fixtures to provision VMs, communicate with their guests, and inject c
 | `fxtVMbyBR`   | Deploy VM workloads at scale through benchmark-runner's separate worker process.              | Per module    |
 | `fxtKrkn`     | Inject chaos into the CUT by running a Krkn Hub scenario.                                     | Per test      |
 
-Both VM fixtures return `vmList` and `vmCreate(...)` for additional batches. Setup waits for provisioning and, by default, VM startup/Ready; it is not a
+Both VM Fixtures return `vmList` and `vmCreate(...)` for additional batches. Setup waits for provisioning and, by default, VM startup/Ready; it is not a
 fire-and-forget background API. `vm.ssh` connects lazily when first used and supports guest commands, PowerShell, and file transfer. Ready does not prove guest
 communication or authorization.
 
-The `fxtVM` can create multiple VMs, but prefer benchmark-runner for scale-oriented workloads rather than the direct fixture's sequential VM operations. This
+The `fxtVM` can create multiple VMs, but prefer `benchmark-runner` for scale-oriented workloads rather than the direct fixture's sequential VM operations. This
 is usage guidance, not a measured performance guarantee.

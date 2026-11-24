@@ -12,7 +12,7 @@ extraVMs = fxtVM.vmCreate(
 )
 ```
 
-See the complete [fixture configuration and parametrization](../fixtures/VM.py#L502) and [factory API reference](../fixtures/VM.py#L192) for all parameters and
+See the complete [Fixture Configuration and Parametrization](../fixtures/VM.py#L502) and [factory API reference](../fixtures/VM.py#L192) for all parameters and
 returned values.
 
 

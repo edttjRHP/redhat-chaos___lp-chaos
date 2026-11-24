@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from fixtures.libs.CommonConstant import LPQE__DEF__NAMESPACE
+from fixtures.libs.CommonModel import LPQE__DEF__FXT_CFG
 from libs.CustomTypes import NamedDict
 from libs.OpenShift.LP.Virt.Resources import VirtualMachine
 from libs.OpenShift.LP.Virt.VM.VM import VM
@@ -27,17 +27,11 @@ from libs.Utils.YAML import YAMLcfg
 
 
 logs = logging.getLogger()
-_DEF__FXT_CFG = NamedDict(
-    kCfg=(
-        os.getenv('KUBECONFIG') or
-        os.path.expanduser('~/.kube/config')
-    ),
+_DEF__FXT_CFG = LPQE__DEF__FXT_CFG | NamedDict(
     # The `--kubeconfig` option will be overridden by the above `.kCfg`.
     cliCfg=NamedDict(
-        ocCfg={},
         vcCfg={},
     ),
-    ns=LPQE__DEF__NAMESPACE,
     fxtInf=NamedDict(
         vmCfg=NamedDict(
             cfgTmpl='cfg-template--vm.yaml',

@@ -38,8 +38,8 @@ def test_example(fxtVMbyBR):
 ```
 
 The `vmCreate(...)` accepts the same settings, returns an additional batch, and appends it to `vmList`. Its VMs also remain until module teardown. See the
-complete [fixture configuration](../fixtures/BenchmarkRunner.py#L290) and [factory API reference](../fixtures/BenchmarkRunner.py#L103), including parameters
-and return values, and [namespace](../README.md#best-practices) and [cleanup](#guest-access-and-ownership) recommendations.
+complete [Fixture Configuration and Parametrization](../fixtures/BenchmarkRunner.py#L290) and [factory API reference](../fixtures/BenchmarkRunner.py#L103),
+including parameters and return values, and [namespace](../README.md#best-practices) and [cleanup](#guest-access-and-ownership) recommendations.
 
 
 ## Options

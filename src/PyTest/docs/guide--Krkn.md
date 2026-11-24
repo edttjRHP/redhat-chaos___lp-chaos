@@ -30,7 +30,7 @@ def test_Chaos(fxtKrkn: FxtObjKrkn) -> None:
 Select and configure the scenario for your test, assert the expected CUT recovery, and provide appropriate cleanup. This is a usage example, not a portable
 acceptance test. Select the repository example with the `krkn` marker: the [pod-scenario example](../test--suites/ts--example/test_Krkn.py) creates its own
 Namespace and Deployment (KrknHub Pod Scenarios kill existing Pods), kills that Pod, and checks its replacement. See the complete
-[fixture configuration and parametrization](../fixtures/Krkn.py#L395) and [runner API reference](../fixtures/Krkn.py#L121) for all parameters and returned
+[Fixture Configuration and Parametrization](../fixtures/Krkn.py#L401) and [runner API reference](../fixtures/Krkn.py#L121) for all parameters and returned
 values.
 
 
@@ -44,9 +44,8 @@ values.
   - Configure via indirect parametrization with `ns`, `kCfg`, `cliCfg`, `testPars`, and nested `NamedDict` settings. The `kCfg` is passed as
     `KRKN_KUBE_CONFIG`. Use an absolute path and align CLI context with the same CUT.
   - The `fxtInf.krknCfg.krknEnv` applies before KrknHub main `env.sh`, `common_run.sh`, and then Scenario `env.sh` are loaded, together with
-    `KRAKEN_FOLDER` (Krkn root), `KRAKEN_HUB_FOLDER` and `SCN_TEMPLATE_ROOT` (scenario directory), `CFG_TEMPLATE_ROOT` (KrknHub root), and `WORK_DIR`
-    (run directory). These scripts can change settings. The `Run(..., envVars=...)` overrides only the final runner invocation, not loading,
-    preparation, or rendering.
+    `KRAKEN_FOLDER` (Krkn root) and `ROOT_FOLDER` (scenario directory). These scripts can change settings. The `Run(..., envVars=...)` overrides only the
+    final runner invocation, not loading, preparation, or rendering.
   - The scenario template is `SCENARIO_TEMPLATE_FILE` (set by the Scenario `env.sh`), relative to the scenario directory, and the config template is
     `CONFIG_FILE_TEMPLATE` (set by the KrknHub main `env.sh`), relative to the KrknHub root, absolute paths also work.
   - If present, scenario `prep.sh` runs after loading and before rendering and dispatch; it must be executable with a valid shebang. A failed preparation stops
@@ -54,7 +53,7 @@ values.
   - The `SCENARIO_FILE` names the rendered scenario. An existing file (e.g. written by `prep.sh`) is used as is, without rendering. An empty template renders
     nothing.
 
-The bundle exposes `krknHub`, resolved `fxtInf`, caller `testPars`, `cli.oc`, `cli.virtCtl`, and `ns`. Setting `ns` does not limit every vendor scenario to
+The bundle exposes `cli.oc`, `cli.virtCtl`, `ns`, resolved `fxtInf`, caller `testPars`, and `krknHub`. Setting `ns` does not limit every vendor scenario to
 that namespace: verify its actual selectors and disruption scope.
 
 
@@ -62,8 +61,8 @@ that namespace: verify its actual selectors and disruption scope.
 
 Each `Run` retains a UTC `YYYYMMDDTHHmmssZ--<scnName>` directory beneath `IENG_PYTEST____FXT__KRKN____KRKN__RUN_DIR__ROOT` (default: `/tmp/run-dir--krkn`).
 A same-name, same-second collision fails rather than overwriting artifacts. See `config/chaos.yaml` for config.
-Relative `SCENARIO_FILE`, `ROLLBACK_VERSIONS_DIRECTORY`, and `TELEMETRY_ARCHIVE_PATH` use the run directory; relative `ALERTS_PATH`, `METRICS_PATH`, and
-`RESILIENCY_FILE` use the Krkn root. `KRKN_DEBUG=True` enables runner debug mode.
+Relative `ROLLBACK_VERSIONS_DIRECTORY` and `TELEMETRY_ARCHIVE_PATH` use the run directory, and relative `SCENARIO_FILE` uses the run directory's
+`scenarios/` sub-directory; relative `ALERTS_PATH`, `METRICS_PATH`, and `RESILIENCY_FILE` use the Krkn root. `KRKN_DEBUG=True` enables runner debug mode.
 
 The fixture is function-scoped and restores the caller's environment and working directory, not cluster state or files modified by scenario scripts. Test
 authors own scenario rollback and artifact retention. Follow the [namespace recommendations](../README.md#best-practices); cluster-wide scenarios need a wider

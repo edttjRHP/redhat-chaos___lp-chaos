@@ -6,11 +6,12 @@
 #   script directory.
 #
 # Arg.:
-#   MODE    Policy if existing installation exist.
+#   mode    Policy if existing installation exist.
 #           Supported values:
-#            -1 Skip it (default).
-#             0 Keep the existing installation and re-install its dependencies.
-#             1 Force a clean install.
+#             -1:   Skip it (default).
+#              0:   Keep the existing installation and re-install its
+#                   dependencies.
+#              1:   Force a clean install.
 #
 # Env. Var.:
 #   IENG_PYTEST____FXT__KRKN____DEF_FXT_CFG__ROOTPATH_KRKN

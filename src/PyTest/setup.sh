@@ -1,10 +1,14 @@
 #!/bin/bash
 # Arg.:
-#   MODE    Policy if existing installation exist.
+#   devInst Development Install request.
+#              0:   Production Install (default).
+#              1:   Development Install.
+#   mode    Policy if existing installation exist.
 #           Supported values:
-#            -1 Skip it (default).
-#             0 Keep the existing installation and re-install its dependencies.
-#             1 Force a clean install.
+#             -1:   Skip it (default).
+#              0:   Keep the existing installation and re-install its
+#                   dependencies.
+#              1:   Force a clean install.
 typeset _scrName="${BASH_SOURCE[0]##*/}"
 typeset _scrPath="$(p="${BASH_SOURCE[0]}"; [ "${p:0:1}" = / ] || p="./${p}"; CDPATH= \command cd -L -- "${p%/*}/" 2> /dev/null;\command pwd -L)"
 set -euxo pipefail; shopt -s inherit_errexit

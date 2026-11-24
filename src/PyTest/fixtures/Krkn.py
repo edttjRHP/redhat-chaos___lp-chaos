@@ -67,9 +67,9 @@ _DEF__FXT_CFG = NamedDict(
         ),
         krknCfg=NamedDict(
             krknEnv={
-                'ENABLE_ES':    'False',
-                'ES_SERVER':    'http://0.0.0.0',
-                'ES_PORT':      'ES_PORT:=443',
+                'ENABLE_ES':    os.getenv('ENABLE_ES', 'False'),
+                'ES_SERVER':    os.getenv('ES_SERVER', 'http://0.0.0.0'),
+                'ES_PORT':      os.getenv('ES_PORT', '443'),
             },
         ),
     ),
@@ -90,11 +90,11 @@ class FxtObjKrkn:
     Can be sub-classed to add fields. Sub-classes must also be decorated with
     `@dataclass(frozen=True)`.
     '''
-    krknHub: 'KrknHub'
-    fxtInf: NamedDict
-    testPars: NamedDict
     cli: NamedDict
     ns: str
+    fxtInf: NamedDict
+    testPars: NamedDict
+    krknHub: 'KrknHub'
 
 
 class KrknHub:
@@ -146,40 +146,46 @@ class KrknHub:
         for details. Current skeleton model:
         ```bash
         #!/bin/bash
-        ROOT_FOLDER="${ROOT_FOLDER:-/home/krkn}"
+        export ROOT_FOLDER="${ROOT_FOLDER:-/home/krkn}"
         export KRAKEN_FOLDER="${KRAKEN_FOLDER:-$ROOT_FOLDER/kraken}"
-        export KRAKEN_HUB_FOLDER="${KRAKEN_HUB_FOLDER:-$ROOT_FOLDER}"
-        export SCN_TEMPLATE_ROOT="${SCN_TEMPLATE_ROOT:-$KRAKEN_FOLDER}"
-        export CFG_TEMPLATE_ROOT="${CFG_TEMPLATE_ROOT:-$KRAKEN_FOLDER}"
-        export WORK_DIR="${WORK_DIR:-$KRAKEN_FOLDER}"
+
         # Source env.sh to read all the vars
         source "$ROOT_FOLDER/main_env.sh"
         source "$ROOT_FOLDER/common_run.sh"
-        source "$KRAKEN_HUB_FOLDER/env.sh"
-        export SCENARIO_PATH="$(resolve_scenario_path "$SCENARIO_FILE" "$WORK_DIR")"
+        source "$ROOT_FOLDER/env.sh"
+        export SCENARIO_PATH="$(resolve_scenario_path "$SCENARIO_FILE" "$KRAKEN_FOLDER/scenario")"
+        export SCENARIO_FILE="${SCENARIO_PATH}"
+        CONFIG_FILE="$KRAKEN_FOLDER/config/<scenarioCfgName>.yaml"
 
         if [[ $KRKN_DEBUG == "True" ]];then
           set -ex
         fi
 
         checks
-        [ -f "$KRAKEN_HUB_FOLDER/prep.sh" ] && "$KRAKEN_HUB_FOLDER/prep.sh"
+        [ -f "$ROOT_FOLDER/prep.sh" ] && "$ROOT_FOLDER/prep.sh"
 
         # Render Scenario and Config files
-        [ -f "$SCENARIO_PATH" ] || envsubst < "$SCN_TEMPLATE_ROOT/scenarios/$SCENARIO_TEMPLATE_FILE" > "$SCENARIO_PATH"
-        envsubst < "$CFG_TEMPLATE_ROOT/config/$CONFIG_FILE_TEMPLATE" > "$WORK_DIR/config/<scenarioCfgName>.yaml"
+        [ -f "$SCENARIO_PATH" ] || envsubst < "$ROOT_FOLDER/SCENARIO_TEMPLATE_FILE" > "$SCENARIO_PATH"
+        envsubst < "$ROOT_FOLDER/CONFIG_FILE_TEMPLATE" > "$CONFIG_FILE"
 
         # Run Kraken
-        cd "$WORK_DIR"
+        cd "$KRAKEN_FOLDER"
         extra_var=""
         if [[ $KRKN_DEBUG == "True" ]];then
           cat "$SCENARIO_PATH"
-          cat "$WORK_DIR/config/<scenarioCfgName>.yaml"
+          cat "$CONFIG_FILE"
           extra_var="--debug True"
         fi
 
-        python3.11 run_kraken.py --config=config/<scenarioCfgName>.yaml $extra_var
+        python3.11 run_kraken.py --config="$CONFIG_FILE" $extra_var
         ```
+        NOTE:
+          - The `ROOT_FOLDER` is where KrknHub selected scenario files are
+            located for Container Execution model. Roughtly equivalent with
+            `Path(kHubRoot / scnName)` for this integration model. Some files
+            under `kHubRoot` end up there in Container Execution model, but all
+            of those files are consumed by `run.sh`. As long as this stay true,
+            it doesn't pose an issue for this integration model.
 
         Inject chaos into the CUT using the selected KrknHub Scenario model.
         Supply scenario targeting, recovery assertions, and cleanup in the
@@ -282,10 +288,7 @@ class KrknHub:
                 **fxtCfg.fxtInf.krknCfg.krknEnv,
                 'KRKN_KUBE_CONFIG': fxtCfg.kCfg,
                 'KRAKEN_FOLDER': krknRoot,
-                'KRAKEN_HUB_FOLDER': scnDir,
-                'SCN_TEMPLATE_ROOT': scnDir,
-                'CFG_TEMPLATE_ROOT': kHubRoot,
-                'WORK_DIR': runDir,
+                'ROOT_FOLDER': scnDir,
             })
             DoShellSource(envFiles=[
                 kHubRoot / 'env.sh',
@@ -313,13 +316,16 @@ class KrknHub:
                         'KRKN_KUBE_CONFIG',
                         'ROLLBACK_VERSIONS_DIRECTORY',
                         'TELEMETRY_ARCHIVE_PATH',
+                    )),
+                    ((runDir / 'scenarios'), (
                         # Set in Scenario `env.sh`.
                         'SCENARIO_FILE',
                     )),
                 )
                 for eVar in eVarLst if os.getenv(eVar)
             })
-            scnFile = Path(os.environ['SCENARIO_FILE'])
+            os.environ['SCENARIO_PATH'] = os.environ['SCENARIO_FILE']
+            scnFile = Path(os.environ['SCENARIO_PATH'])
             cfgFile = (runDir / 'config/chaos.yaml').resolve()
             for dir in (cfgFile.parent, scnFile.parent, *(
                 Path(os.environ[eVar])

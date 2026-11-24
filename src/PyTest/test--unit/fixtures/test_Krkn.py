@@ -179,6 +179,8 @@ def HubContext(testBoundaries: SimpleNamespace) -> SimpleNamespace:
     scnTemplate.read_bytes.return_value = b'scenario-template'
     cfgTemplate.read_bytes.return_value = b'config-template'
     environ = context.environ
+    # `Run` writes `SCENARIO_PATH` directly; only the real `TempEnv` (mocked
+    #   here) restores it, so tests expect it in this environment.
     environ.update({
         'SCENARIO_TEMPLATE_FILE': 'selected.yaml.template',
         'CONFIG_FILE_TEMPLATE': 'config.yaml.template',
@@ -200,11 +202,7 @@ def HubContext(testBoundaries: SimpleNamespace) -> SimpleNamespace:
     config.__or__.return_value = runConfig
     hub = MUT.KrknHub(None, MUT.InstParsKrknHub(fxtCfgObj=config))
     # The runner roots `Run` exports before loading the `env.sh` files.
-    roots = {
-        'KRAKEN_FOLDER': krknRoot, 'KRAKEN_HUB_FOLDER': scnDir,
-        'SCN_TEMPLATE_ROOT': scnDir, 'CFG_TEMPLATE_ROOT': kHubRoot,
-        'WORK_DIR': runDir,
-    }
+    roots = {'KRAKEN_FOLDER': krknRoot, 'ROOT_FOLDER': scnDir}
     envFiles = [
         (kHubRoot / 'env.sh'), (kHubRoot / 'common_run.sh'),
         (scnDir / 'env.sh'),
@@ -527,7 +525,7 @@ def test_FxtKrkn_PassesInheritedAndShellValuesToConfigHelper(
     }
     defaultEnv = {
         'ENABLE_ES': 'False', 'ES_SERVER': 'http://0.0.0.0',
-        'ES_PORT': 'ES_PORT:=443',
+        'ES_PORT': '9443',
     }
     context.environ.update(inherited)
     context.environ['KRKN_TEST_UNRELATED'] = 'not copied'
@@ -923,7 +921,11 @@ def test_Run_PropagatesErrorsAndExitsMockedContexts(
     if (failure in ('root', 'scenario', 'runner', 'exit')):
         assert (raised.value is error)
 
-    assert (context.environ == beforeEnv)
+    published = (
+        {} if (failure in ('root', 'scenario'))
+        else {'SCENARIO_PATH': beforeEnv['SCENARIO_FILE']}
+    )
+    assert (context.environ == (beforeEnv | published))
     assert context.boundary.tempEnv.return_value.__exit__.called
     if (failure in ('missingRunner', 'runner', 'exit')):
         assert (context.boundary.runner.call_args.args[2] is context.runDir)
@@ -1110,7 +1112,8 @@ def test_Run_AnchorsPathsAndCreatesOnlyOutputDirectories(
 ) -> None:
     context = hubContext
     # Bundled Krkn profiles are inputs under `krknRoot`; the kubeconfig input
-    #   and outputs follow the Krkn runtime CWD (`runDir`).
+    #   and outputs follow the Krkn runtime CWD (`runDir`), except the
+    #   scenario output, which is under `runDir/scenarios`.
     inputKeys = ('ALERTS_PATH', 'METRICS_PATH', 'RESILIENCY_FILE')
     runInputKeys = ('KRKN_KUBE_CONFIG',)
     outputKeys = (
@@ -1133,7 +1136,11 @@ def test_Run_AnchorsPathsAndCreatesOnlyOutputDirectories(
     for key in inputKeys:
         expected[key] = context.paths.Make((context.krknRoot / values[key]))
     for key in (*runInputKeys, *outputKeys):
-        expected[key] = context.paths.Make((context.runDir / values[key]))
+        anchor = (
+            (context.runDir / 'scenarios') if (key == 'SCENARIO_FILE')
+            else context.runDir
+        )
+        expected[key] = context.paths.Make((anchor / values[key]))
 
     rawEnvironment = dict(context.environ)
     resolvedEnvironment = {
@@ -1151,6 +1158,7 @@ def test_Run_AnchorsPathsAndCreatesOnlyOutputDirectories(
     assert (pathUpdate == expected)
     context.paths.Make((context.runDir / 'config')).mkdir.assert_called_once()
     scenarioOutput = expected['SCENARIO_FILE']
+    assert (resolvedEnvironment['SCENARIO_PATH'] == str(scenarioOutput))
     assert scenarioOutput.parent.mkdir.called
     expected['ROLLBACK_VERSIONS_DIRECTORY'].mkdir.assert_called_once()
     expected['TELEMETRY_ARCHIVE_PATH'].mkdir.assert_called_once()
@@ -1255,7 +1263,7 @@ def test_Run_SeedsEnvironmentBeforeSourcingAndKeepsRunnerOverrides(
     )
     context.boundary.namedDict.assert_called_once_with({'fxtInf': fxtInf})
     calls = [call[0] for call in events.method_calls]
-    # The run directory is the `WORK_DIR` exported before sourcing.
+    # The run directory exists before seeding and sourcing.
     assert (calls.index('run_dir') < calls.index('update_env'))
     assert (calls.index('update_env') < calls.index('source'))
     context.boundary.updateEnv.assert_any_call({
@@ -1268,7 +1276,9 @@ def test_Run_SeedsEnvironmentBeforeSourcingAndKeepsRunnerOverrides(
         'synthetic_run',
     )
 
-    assert (context.environ == beforeEnv)
+    assert (context.environ == (
+        beforeEnv | {'SCENARIO_PATH': beforeEnv['SCENARIO_FILE']}
+    ))
 
 
 @pytest.mark.parametrize(('ambient', 'configured', 'expected'), [
@@ -1304,7 +1314,7 @@ def test_Run_SeedsDefaultsBeneathConfiguredEnvironment(
     assert (seed == {
         **expected, 'KRKN_KUBE_CONFIG': 'fake-config', **context.roots,
     })
-    # The run root is read first: its run directory is the `WORK_DIR`.
+    # The run root is read before the seeded defaults.
     assert (
         context.boundary.getenv.call_args_list[:3] == [
             mock.call(
@@ -1494,7 +1504,11 @@ def test_Run_RejectsMissingRequiredVariablesAndExitsTemporaryEnvironment(
         context.hub.Run('pod-scenarios')
     assert (raised.value.args == (selector,))
 
-    assert (context.environ == beforeEnv)
+    published = (
+        {} if (selector == 'SCENARIO_FILE')
+        else {'SCENARIO_PATH': beforeEnv['SCENARIO_FILE']}
+    )
+    assert (context.environ == (beforeEnv | published))
     context.scnFile.write_bytes.assert_not_called()
     context.cfgFile.write_bytes.assert_not_called()
     context.boundary.tempEnv.return_value.__exit__.assert_called_once()
